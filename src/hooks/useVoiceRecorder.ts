@@ -8,6 +8,11 @@ import {
   useSyncExternalStore,
 } from "react";
 import { RecordingStatus } from "@/types";
+import { startPcmWavRecorder, PcmWavRecorder } from "@/utils/audio";
+
+interface UseVoiceRecorderOptions {
+  onRecordingComplete?: (audioBlob: Blob) => Promise<void> | void;
+}
 
 interface UseVoiceRecorderReturn {
   status: RecordingStatus;
@@ -18,39 +23,48 @@ interface UseVoiceRecorderReturn {
   startRecording: () => Promise<void>;
   stopRecording: () => void;
   resetRecording: () => void;
+  setStatus: React.Dispatch<React.SetStateAction<RecordingStatus>>;
+  setError: React.Dispatch<React.SetStateAction<string | null>>;
   isSupported: boolean;
 }
 
 const emptySubscribe = () => () => {};
 
-// Safe feature check for MediaRecorder and getUserMedia
+// Safe feature check for MediaDevices and AudioContext
 function checkBrowserSupport(): boolean {
   if (typeof window === "undefined" || typeof navigator === "undefined") {
     return false;
   }
   return Boolean(
     navigator.mediaDevices &&
-      typeof navigator.mediaDevices.getUserMedia === "function" &&
-      typeof window.MediaRecorder !== "undefined"
+      typeof navigator.mediaDevices.getUserMedia === "function"
   );
 }
 
-export function useVoiceRecorder(): UseVoiceRecorderReturn {
+export function useVoiceRecorder(
+  options?: UseVoiceRecorderOptions
+): UseVoiceRecorderReturn {
   const [status, setStatus] = useState<RecordingStatus>("idle");
   const [error, setError] = useState<string | null>(null);
   const [recordingSeconds, setRecordingSeconds] = useState<number>(0);
   const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
 
-  // Modern React 19 external store hook to check MediaRecorder browser support safely
+  const onRecordingCompleteRef = useRef(options?.onRecordingComplete);
+  useEffect(() => {
+    onRecordingCompleteRef.current = options?.onRecordingComplete;
+  }, [options?.onRecordingComplete]);
+
+  // Modern React 19 external store hook to check browser support safely
   const isSupported = useSyncExternalStore(
     emptySubscribe,
     checkBrowserSupport,
     () => true
   );
 
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const pcmRecorderRef = useRef<PcmWavRecorder | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const timerIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -69,26 +83,6 @@ export function useVoiceRecorder(): UseVoiceRecorderReturn {
     };
   }, [audioUrl]);
 
-  // Determine optimal supported audio mime type
-  const getSupportedMimeType = (): string => {
-    if (typeof window === "undefined" || typeof window.MediaRecorder === "undefined") {
-      return "";
-    }
-    const candidateTypes = [
-      "audio/webm;codecs=opus",
-      "audio/webm",
-      "audio/ogg;codecs=opus",
-      "audio/mp4",
-      "audio/aac",
-    ];
-    for (const type of candidateTypes) {
-      if (MediaRecorder.isTypeSupported(type)) {
-        return type;
-      }
-    }
-    return "";
-  };
-
   const startRecording = useCallback(async () => {
     setError(null);
     setAudioBlob(null);
@@ -101,7 +95,9 @@ export function useVoiceRecorder(): UseVoiceRecorderReturn {
 
     try {
       if (!checkBrowserSupport()) {
-        throw new Error("Microphone API not supported on this browser.");
+        throw new Error(
+          "Microphone is not accessible. Please ensure you are running on localhost or HTTPS."
+        );
       }
 
       // Request microphone access
@@ -116,50 +112,32 @@ export function useVoiceRecorder(): UseVoiceRecorderReturn {
       streamRef.current = stream;
       audioChunksRef.current = [];
 
-      const mimeType = getSupportedMimeType();
-      const options: MediaRecorderOptions = mimeType ? { mimeType } : {};
-      const recorder = new MediaRecorder(stream, options);
-      mediaRecorderRef.current = recorder;
+      // 1. Primary: Direct 16kHz PCM WAV recorder via Web Audio API
+      try {
+        pcmRecorderRef.current = startPcmWavRecorder(stream);
+      } catch (pcmErr) {
+        console.warn("Direct PCM recorder initialization failed:", pcmErr);
+        pcmRecorderRef.current = null;
+      }
 
-      recorder.ondataavailable = (event: BlobEvent) => {
-        if (event.data && event.data.size > 0) {
-          audioChunksRef.current.push(event.data);
+      // 2. Secondary/Backup: Native MediaRecorder
+      if (typeof window.MediaRecorder !== "undefined") {
+        try {
+          const recorder = new MediaRecorder(stream);
+          mediaRecorderRef.current = recorder;
+
+          recorder.ondataavailable = (event: BlobEvent) => {
+            if (event.data && event.data.size > 0) {
+              audioChunksRef.current.push(event.data);
+            }
+          };
+
+          recorder.start(200);
+        } catch (recErr) {
+          console.warn("MediaRecorder backup start failed:", recErr);
         }
-      };
+      }
 
-      recorder.onstop = () => {
-        const finalBlob = new Blob(audioChunksRef.current, {
-          type: recorder.mimeType || "audio/webm",
-        });
-        const url = URL.createObjectURL(finalBlob);
-        setAudioBlob(finalBlob);
-        setAudioUrl(url);
-        setStatus("stopped");
-
-        // Stop all audio hardware tracks immediately so mic indicator turns off
-        if (streamRef.current) {
-          streamRef.current.getTracks().forEach((track) => track.stop());
-          streamRef.current = null;
-        }
-
-        // Stop timer
-        if (timerIntervalRef.current) {
-          clearInterval(timerIntervalRef.current);
-          timerIntervalRef.current = null;
-        }
-      };
-
-      recorder.onerror = () => {
-        setError("Recording ke dauran error aayi. Kripya dubara koshish karein.");
-        setStatus("error");
-        if (timerIntervalRef.current) {
-          clearInterval(timerIntervalRef.current);
-          timerIntervalRef.current = null;
-        }
-      };
-
-      // Start recording with 200ms timeslices for smooth chunk collection
-      recorder.start(200);
       setStatus("recording");
 
       // Start duration counter
@@ -192,28 +170,98 @@ export function useVoiceRecorder(): UseVoiceRecorderReturn {
       ) {
         setError("Microphone kisi doosre app me vyast hai.");
       } else {
-        setError(
-          "Microphone shuru karne me samasya aayi. Kripya dubara prayas karein."
-        );
+        const msg =
+          err instanceof Error
+            ? err.message
+            : "Microphone shuru karne me samasya aayi.";
+        setError(msg);
       }
     }
   }, [audioUrl]);
 
-  const stopRecording = useCallback(() => {
+  const stopRecording = useCallback(async () => {
+    if (status !== "recording") return;
+
+    // Stop duration timer
+    if (timerIntervalRef.current) {
+      clearInterval(timerIntervalRef.current);
+      timerIntervalRef.current = null;
+    }
+
+    // Stop MediaRecorder backup if running
     if (
       mediaRecorderRef.current &&
       mediaRecorderRef.current.state !== "inactive"
     ) {
-      mediaRecorderRef.current.stop();
+      try {
+        mediaRecorderRef.current.stop();
+      } catch {
+        // ignore
+      }
     }
-  }, []);
+
+    // Obtain final audio blob
+    let finalBlob: Blob | null = null;
+
+    if (pcmRecorderRef.current) {
+      try {
+        finalBlob = await pcmRecorderRef.current.stop();
+        pcmRecorderRef.current = null;
+      } catch (err) {
+        console.warn("PCM recorder stop error:", err);
+      }
+    }
+
+    // Fallback to MediaRecorder chunks if PCM recorder didn't produce a blob
+    if (!finalBlob || finalBlob.size === 0) {
+      finalBlob = new Blob(audioChunksRef.current, {
+        type: mediaRecorderRef.current?.mimeType || "audio/webm",
+      });
+    }
+
+    // Release hardware audio tracks immediately
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+
+    const url = URL.createObjectURL(finalBlob);
+    setAudioBlob(finalBlob);
+    setAudioUrl(url);
+
+    // Call completion callback (which posts to /api/stt)
+    if (onRecordingCompleteRef.current) {
+      setStatus("processing");
+      try {
+        await onRecordingCompleteRef.current(finalBlob);
+        setStatus("stopped");
+      } catch (err) {
+        const msg =
+          err instanceof Error
+            ? err.message
+            : "Prisma STT recording conversion failed.";
+        setError(msg);
+        setStatus("error");
+      }
+    } else {
+      setStatus("stopped");
+    }
+  }, [status]);
 
   const resetRecording = useCallback(() => {
     if (
       mediaRecorderRef.current &&
       mediaRecorderRef.current.state !== "inactive"
     ) {
-      mediaRecorderRef.current.stop();
+      try {
+        mediaRecorderRef.current.stop();
+      } catch {
+        // ignore
+      }
+    }
+    if (pcmRecorderRef.current) {
+      pcmRecorderRef.current.stop().catch(() => {});
+      pcmRecorderRef.current = null;
     }
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
@@ -242,6 +290,8 @@ export function useVoiceRecorder(): UseVoiceRecorderReturn {
     startRecording,
     stopRecording,
     resetRecording,
+    setStatus,
+    setError,
     isSupported,
   };
 }

@@ -9,6 +9,20 @@
 !.yarn/plugins
 !.yarn/releases
 !.yarn/versions
+Prisma STT is failing to convert recorded speech into text. Diagnose and fix the root cause.
+
+* Inspect microphone recording, audio format, MIME type and upload process.
+* Verify the Gnani API endpoint, authentication, request parameters and response parsing against official documentation.
+* Verify `GNANI_API_KEY` is correctly loaded from `.env.local`.
+* Inspect actual backend errors and API responses.
+* Fix the issue without rebuilding the application.
+* Preserve existing UI and microphone functionality.
+* Never use mock transcripts or another STT provider.
+* Add proper error handling.
+
+**Test:** Record real Marathi, Hindi and Hinglish speech and verify that Prisma returns the actual transcription in the chat.
+
+Do not declare completion until real speech-to-text conversion works. Briefly report the root cause and fix.
 
 # testing
 /coverage
