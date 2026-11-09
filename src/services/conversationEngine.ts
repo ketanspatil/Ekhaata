@@ -11,6 +11,8 @@ import {
   getActiveCustomersCount,
   getRecentTransactions,
   findCustomerMatch,
+  getLastReversibleTransaction,
+  reverseTransaction,
 } from "@/services/ledgerService";
 import {
   extractAmount,
@@ -19,10 +21,61 @@ import {
 import {
   extractCustomerName,
 } from "@/utils/nameNormalizer";
+import {
+  interpretShopkeeperSpeechWithGemini,
+  GeminiAudioInterpretation,
+} from "@/services/geminiService";
 
 export interface IntentClassification {
   intent: ShopkeeperIntent;
   isAmbiguous: boolean;
+}
+
+/**
+ * Determines whether an input statement is in Marathi, Hindi, or Hinglish/English.
+ */
+export function detectLanguageFromText(text: string): "hi-IN" | "mr-IN" | "en-IN" {
+  const lower = text.toLowerCase();
+  // Marathi distinctive words / grammar markers
+  if (
+    lower.includes("chya") ||
+    lower.includes("cha") ||
+    lower.includes("chi") ||
+    lower.includes("che") ||
+    lower.includes("kadun") ||
+    lower.includes("navavar") ||
+    lower.includes("aahe") ||
+    lower.includes("aahet") ||
+    lower.includes("dila") ||
+    lower.includes("dile") ||
+    lower.includes("kiti") ||
+    lower.includes("ekun") ||
+    lower.includes("liha") ||
+    lower.includes("nondva") ||
+    lower.includes("parat") ||
+    lower.includes("bhau") ||
+    lower.includes("त्याच्या") ||
+    lower.includes("च्या") ||
+    lower.includes("चा") ||
+    lower.includes("ची") ||
+    lower.includes("चे") ||
+    lower.includes("कडून") ||
+    lower.includes("नावावर") ||
+    lower.includes("आहे") ||
+    lower.includes("आहेत") ||
+    lower.includes("दिला") ||
+    lower.includes("दिले") ||
+    lower.includes("किती") ||
+    lower.includes("एकूण") ||
+    lower.includes("लिहा") ||
+    lower.includes("नोंदवा") ||
+    lower.includes("परत") ||
+    lower.includes("भाऊ")
+  ) {
+    return "mr-IN";
+  }
+
+  return "hi-IN";
 }
 
 /**
@@ -32,6 +85,29 @@ export interface IntentClassification {
 export function classifyTransactionIntent(text: string): IntentClassification {
   const lower = text.toLowerCase();
   const detectedCust = extractCustomerName(text);
+
+  // 0. REVERSE_TRANSACTION (Undo mistake / cancel previous entry)
+  if (
+    lower.includes("galti ho gayi") ||
+    lower.includes("galat ho gaya") ||
+    lower.includes("galat likh diya") ||
+    lower.includes("last transaction wapas") ||
+    lower.includes("last entry hatao") ||
+    lower.includes("pichla transaction wapas") ||
+    lower.includes("pichli entry hatao") ||
+    lower.includes("reversal karo") ||
+    lower.includes("reverse karo") ||
+    lower.includes("chuk bhali") ||
+    lower.includes("chukli") ||
+    lower.includes("चुका झाली") ||
+    lower.includes("चूक झाली") ||
+    lower.includes("गलती हो गई") ||
+    lower.includes("गलत लिख दिया") ||
+    lower.includes("रिवर्स करो") ||
+    lower.includes("वापस करो") && (lower.includes("last") || lower.includes("pichla") || lower.includes("entry"))
+  ) {
+    return { intent: "REVERSE_TRANSACTION", isAmbiguous: false };
+  }
 
   // 1. CHECK_TOTAL
   if (
@@ -290,13 +366,318 @@ Return ONLY pure JSON.`,
  */
 export async function parseShopkeeperCommand(
   transcript: string,
-  context?: ConversationContext
+  context?: ConversationContext,
+  shopId?: string | null,
+  audioParams?: {
+    audioBase64?: string | null;
+    audioMimeType?: string | null;
+  }
 ): Promise<ConversationResponse> {
   const evonApiUrl = process.env.EVON_API_URL;
   const evonApiKey = process.env.EVON_API_KEY || process.env.GNANI_API_KEY;
 
   let evonAvailable = false;
-  let engineUsed: "evon-api" | "indic-nlu-engine" = "indic-nlu-engine";
+  let engineUsed: "gemini-flash" | "evon-api" | "indic-nlu-engine" = "indic-nlu-engine";
+  let geminiInterpretation: GeminiAudioInterpretation | null = null;
+
+  // 0. Gemini Multimodal Audio & Bookkeeping Understanding
+  // If GEMINI_API_KEY is available, let Gemini inspect audio + Prisma transcript
+  if (process.env.GEMINI_API_KEY) {
+    geminiInterpretation = await interpretShopkeeperSpeechWithGemini({
+      audioBase64: audioParams?.audioBase64,
+      audioMimeType: audioParams?.audioMimeType,
+      prismaTranscript: transcript,
+      contextCustomerName: context?.lastCustomerName,
+    });
+    if (geminiInterpretation) {
+      engineUsed = "gemini-flash";
+    }
+  }
+
+  // 0. Language detection for TTS response
+  let detectedLang: "hi-IN" | "mr-IN" | "en-IN" = "hi-IN";
+  if (geminiInterpretation?.language === "Marathi") {
+    detectedLang = "mr-IN";
+  } else if (geminiInterpretation?.language === "English") {
+    detectedLang = "en-IN";
+  } else {
+    detectedLang = detectLanguageFromText(transcript);
+  }
+
+  // Handle explicit Reversal intent ("Galti ho gayi, last transaction wapas karo")
+  const classification = classifyTransactionIntent(transcript);
+  let intent = classification.intent;
+
+  // Integrate Gemini's multi-modal audio interpretation (if Gemini was invoked successfully):
+  if (geminiInterpretation) {
+    if (geminiInterpretation.transaction_type && geminiInterpretation.transaction_type !== "UNKNOWN") {
+      intent = geminiInterpretation.transaction_type;
+    }
+  }
+
+  // Handle confirmation for REVERSAL
+  if (context?.lastQuestionType === "reversal_confirmation") {
+    const lower = transcript.toLowerCase();
+    const isAffirmative =
+      lower.includes("haan") ||
+      lower.includes("ha") ||
+      lower.includes("sahi") ||
+      lower.includes("theek") ||
+      lower.includes("ho") ||
+      lower.includes("yes") ||
+      lower.includes("kar do") ||
+      lower.includes("wapas") ||
+      lower.includes("hata do") ||
+      lower.includes("हा") ||
+      lower.includes("हो") ||
+      lower.includes("बरोबर") ||
+      lower.includes("ठीक") ||
+      lower.includes("सही");
+
+    const isNegative =
+      lower.includes("nahi") ||
+      lower.includes("na") ||
+      lower.includes("cancel") ||
+      lower.includes("galat") ||
+      lower.includes("nako") ||
+      lower.includes("rehne do") ||
+      lower.includes("नाही") ||
+      lower.includes("नको") ||
+      lower.includes("गलत");
+
+    if (isAffirmative && context.pendingReversalId) {
+      try {
+        await reverseTransaction(
+          context.pendingReversalId,
+          "User voice reversal request",
+          shopId
+        );
+
+        const custName = context.pendingReversalCustomer || "Grahak";
+        const balInfo = await getCustomerBalance(custName, shopId);
+
+        const revSuccessReply =
+          detectedLang === "mr-IN"
+            ? `मागील व्यवहार रद्द केला! ${balInfo.displayName} चा व्यवहार उलट नोंदवला. आता शिल्लक ₹${balInfo.balance.toLocaleString("en-IN")} आहे.`
+            : `Pichla transaction cancel kar diya hai! ${balInfo.displayName} ka hisaab theek ho gaya. Ab baaki balance ₹${balInfo.balance.toLocaleString("en-IN")} hai.`;
+
+        return {
+          success: true,
+          command: {
+            intent: "REVERSE_TRANSACTION",
+            customer_name: balInfo.displayName,
+            amount: context.pendingReversalAmount || null,
+            description: `Reversal of ${context.pendingReversalId}`,
+            missing_fields: [],
+            needs_clarification: false,
+            confidence: 0.99,
+          },
+          reply: revSuccessReply,
+          updatedContext: {
+            lastCustomerName: balInfo.displayName,
+          },
+          engineUsed,
+          evonAvailable,
+          geminiUsed: !!geminiInterpretation,
+          detectedLanguage: detectedLang,
+          customerBalance: balInfo.balance,
+          totalPending: await getTotalPendingUdhaar(shopId),
+          activeCustomersCount: await getActiveCustomersCount(shopId),
+          transactions: await getRecentTransactions(5, shopId),
+        };
+      } catch (err: unknown) {
+        const errMsg = err instanceof Error ? err.message : "Reversal failed";
+        return {
+          success: false,
+          command: {
+            intent: "REVERSE_TRANSACTION",
+            customer_name: null,
+            amount: null,
+            description: null,
+            missing_fields: [],
+            needs_clarification: false,
+            confidence: 0.5,
+          },
+          reply: `Reversal karne me dikkat aayi: ${errMsg}`,
+          updatedContext: {},
+          engineUsed,
+          evonAvailable,
+          detectedLanguage: detectedLang,
+          error: errMsg,
+        };
+      }
+    } else if (isNegative) {
+      return {
+        success: true,
+        command: {
+          intent: "UNKNOWN",
+          customer_name: null,
+          amount: null,
+          description: null,
+          missing_fields: [],
+          needs_clarification: false,
+          confidence: 0.99,
+        },
+        reply: "Theek hai, reversal cancel kar diya hai. Kuch aur likhna hai?",
+        updatedContext: {},
+        engineUsed,
+        evonAvailable,
+        geminiUsed: !!geminiInterpretation,
+        detectedLanguage: detectedLang,
+        totalPending: await getTotalPendingUdhaar(shopId),
+        activeCustomersCount: await getActiveCustomersCount(shopId),
+        transactions: await getRecentTransactions(5, shopId),
+      };
+    }
+  }
+
+  // Handle confirmation for multiple transactions or single transaction
+  if (context?.lastQuestionType === "confirmation") {
+    const lower = transcript.toLowerCase();
+    const isAffirmative =
+      lower.includes("haan") ||
+      lower.includes("ha") ||
+      lower.includes("sahi") ||
+      lower.includes("theek") ||
+      lower.includes("ho") ||
+      lower.includes("yes") ||
+      lower.includes("kar do") ||
+      lower.includes("likh lo") ||
+      lower.includes("likho") ||
+      lower.includes("dono likho") ||
+      lower.includes("हा") ||
+      lower.includes("हो") ||
+      lower.includes("बरोबर") ||
+      lower.includes("ठीक") ||
+      lower.includes("सही");
+
+    const isNegative =
+      lower.includes("nahi") ||
+      lower.includes("na") ||
+      lower.includes("cancel") ||
+      lower.includes("galat") ||
+      lower.includes("nako") ||
+      lower.includes("नाही") ||
+      lower.includes("नको") ||
+      lower.includes("गलत");
+
+    // Case 1: Multiple pending transactions confirmed!
+    if (isAffirmative && context.pendingMultipleOps && context.pendingMultipleOps.length >= 2) {
+      const ops = context.pendingMultipleOps;
+      const savedSummaries: string[] = [];
+
+      for (const op of ops) {
+        const txType = op.intent === "ADD_CREDIT" ? "udhaar" : "jama";
+        await recordTransaction(op.customer_name, txType, op.amount, undefined, shopId);
+        const bal = await getCustomerBalance(op.customer_name, shopId);
+        savedSummaries.push(
+          `${bal.displayName} ka ₹${op.amount} ${txType} (baaki: ₹${bal.balance.toLocaleString("en-IN")})`
+        );
+      }
+
+      const multiReply =
+        detectedLang === "mr-IN"
+          ? `दोन्ही नोंदी पूर्ण झाल्या! ${savedSummaries.join(" आणि ")}.`
+          : `Likh liya! ${savedSummaries.join(" aur ")}.`;
+
+      return {
+        success: true,
+        command: {
+          intent: ops[0].intent,
+          customer_name: ops[0].customer_name,
+          amount: ops[0].amount,
+          description: null,
+          missing_fields: [],
+          needs_clarification: false,
+          confidence: 0.99,
+        },
+        reply: multiReply,
+        updatedContext: {
+          lastCustomerName: ops[ops.length - 1].customer_name,
+        },
+        engineUsed,
+        evonAvailable,
+        geminiUsed: !!geminiInterpretation,
+        correctedTranscript: geminiInterpretation?.corrected_transcript,
+        detectedLanguage: detectedLang,
+        totalPending: await getTotalPendingUdhaar(shopId),
+        activeCustomersCount: await getActiveCustomersCount(shopId),
+        transactions: await getRecentTransactions(5, shopId),
+      };
+    }
+
+    // Case 2: Single pending transaction confirmed!
+    if (isAffirmative && context.pendingCustomerName && context.pendingAmount && context.pendingIntent) {
+      const resolvedCustomer = context.pendingCustomerName;
+      const resolvedAmount = context.pendingAmount;
+      const resolvedIntent = context.pendingIntent;
+
+      if (resolvedIntent === "ADD_CREDIT") {
+        await recordTransaction(resolvedCustomer, "udhaar", resolvedAmount, undefined, shopId);
+      } else {
+        await recordTransaction(resolvedCustomer, "jama", resolvedAmount, undefined, shopId);
+      }
+
+      const balanceInfo = await getCustomerBalance(resolvedCustomer, shopId);
+
+      const finalReply =
+        detectedLang === "mr-IN"
+          ? (resolvedIntent === "ADD_CREDIT"
+              ? `नोंद झाली! ${balanceInfo.displayName} चे ₹${resolvedAmount.toLocaleString("en-IN")} उधार नोंदवले. आता एकूण बाकी ₹${balanceInfo.balance.toLocaleString("en-IN")} आहे.`
+              : `नोंद झाली! ${balanceInfo.displayName} चे ₹${resolvedAmount.toLocaleString("en-IN")} जमा झाले. आता शिल्लक ₹${balanceInfo.balance.toLocaleString("en-IN")} आहे.`)
+          : (resolvedIntent === "ADD_CREDIT"
+              ? `Likh liya! ${balanceInfo.displayName} ka ₹${resolvedAmount.toLocaleString("en-IN")} udhaar darj ho gaya. Ab kul baaki ₹${balanceInfo.balance.toLocaleString("en-IN")} hai.`
+              : `Likh liya! ${balanceInfo.displayName} ke ₹${resolvedAmount.toLocaleString("en-IN")} jama ho gaye. Ab baaki hisaab ₹${balanceInfo.balance.toLocaleString("en-IN")} hai.`);
+
+      return {
+        success: true,
+        command: {
+          intent: resolvedIntent,
+          customer_name: balanceInfo.displayName,
+          amount: resolvedAmount,
+          description: null,
+          missing_fields: [],
+          needs_clarification: false,
+          confidence: 0.99,
+        },
+        reply: finalReply,
+        updatedContext: {
+          lastCustomerName: balanceInfo.displayName,
+        },
+        engineUsed,
+        evonAvailable,
+        geminiUsed: !!geminiInterpretation,
+        correctedTranscript: geminiInterpretation?.corrected_transcript,
+        detectedLanguage: detectedLang,
+        customerBalance: balanceInfo.balance,
+        totalPending: await getTotalPendingUdhaar(shopId),
+        activeCustomersCount: await getActiveCustomersCount(shopId),
+        transactions: await getRecentTransactions(5, shopId),
+      };
+    } else if (isNegative) {
+      return {
+        success: true,
+        command: {
+          intent: "UNKNOWN",
+          customer_name: null,
+          amount: null,
+          description: null,
+          missing_fields: [],
+          needs_clarification: false,
+          confidence: 0.99,
+        },
+        reply: "Theek hai, transaction cancel kar diya hai. Kuch aur likhna hai?",
+        updatedContext: {},
+        engineUsed,
+        evonAvailable,
+        geminiUsed: !!geminiInterpretation,
+        detectedLanguage: detectedLang,
+        totalPending: await getTotalPendingUdhaar(shopId),
+        activeCustomersCount: await getActiveCustomersCount(shopId),
+        transactions: await getRecentTransactions(5, shopId),
+      };
+    }
+  }
 
   // 1. Try Evon API if explicit EVON_API_URL is configured
   if (evonApiUrl) {
@@ -315,70 +696,171 @@ export async function parseShopkeeperCommand(
         updatedContext: {},
         engineUsed,
         evonAvailable,
+        detectedLanguage: detectedLang,
       };
     }
   }
 
-  // 2. Multi-operation check (e.g. "Ramesh ko 500 udhaar aur Amit ne 200 wapas diye")
-  const multiOps = detectMultipleOperations(transcript);
-  if (multiOps && multiOps.length >= 2) {
-    const op1 = multiOps[0];
-    const op2 = multiOps[1];
+  // 2. Check for REVERSE_TRANSACTION command ("Galti ho gayi, last transaction wapas karo")
+  if (intent === "REVERSE_TRANSACTION") {
+    const lastTx = await getLastReversibleTransaction(shopId);
+    if (!lastTx) {
+      const noTxReply =
+        detectedLang === "mr-IN"
+          ? "मागे रद्द करण्यासाठी कोणताही व्यवहार सापडला नाही."
+          : "Wapas karne ke liye koi pichla transaction nahi mila.";
+      return {
+        success: true,
+        command: {
+          intent: "REVERSE_TRANSACTION",
+          customer_name: null,
+          amount: null,
+          description: null,
+          missing_fields: [],
+          needs_clarification: false,
+          confidence: 0.95,
+        },
+        reply: noTxReply,
+        updatedContext: {},
+        engineUsed,
+        evonAvailable,
+        geminiUsed: !!geminiInterpretation,
+        detectedLanguage: detectedLang,
+        totalPending: await getTotalPendingUdhaar(shopId),
+        activeCustomersCount: await getActiveCustomersCount(shopId),
+        transactions: await getRecentTransactions(5, shopId),
+      };
+    }
 
-    const reply = `${op1.customer_name || "Grahak"} ka ₹${op1.amount || 0} ${
-      op1.intent === "ADD_CREDIT" ? "udhaar" : "jama"
-    } aur ${op2.customer_name || "Grahak"} ka ₹${op2.amount || 0} ${
-      op2.intent === "ADD_CREDIT" ? "udhaar" : "jama"
-    } - dono likh loon?`;
+    const typeDesc = lastTx.type === "udhaar" ? "udhaar" : "jama";
+    const confirmRevReply =
+      detectedLang === "mr-IN"
+        ? `शेवटचा व्यवहार: ${lastTx.customerName} चे ₹${lastTx.amount} ${typeDesc}. हा व्यवहार रद्द करून उलट नोंद करायची का?`
+        : `Aakhri transaction: ${lastTx.customerName} ka ₹${lastTx.amount} ${typeDesc}. Kya is transaction ko wapas (reverse) karna hai?`;
+
+    return {
+      success: true,
+      command: {
+        intent: "REVERSE_TRANSACTION",
+        customer_name: lastTx.customerName,
+        amount: lastTx.amount,
+        description: `Pending reversal for ${lastTx.id}`,
+        missing_fields: [],
+        needs_clarification: true,
+        clarification_question: confirmRevReply,
+        confidence: 0.98,
+      },
+      reply: confirmRevReply,
+      updatedContext: {
+        lastQuestionType: "reversal_confirmation",
+        pendingReversalId: lastTx.id,
+        pendingReversalCustomer: lastTx.customerName,
+        pendingReversalAmount: lastTx.amount,
+        pendingReversalType: lastTx.type,
+      },
+      engineUsed,
+      evonAvailable,
+      geminiUsed: !!geminiInterpretation,
+      detectedLanguage: detectedLang,
+      totalPending: await getTotalPendingUdhaar(shopId),
+      activeCustomersCount: await getActiveCustomersCount(shopId),
+      transactions: await getRecentTransactions(5, shopId),
+    };
+  }
+
+  // 3. Multi-operation check (from Gemini or regex detection)
+  // E.g. "Ramesh ko 500 udhaar aur Amit ne 200 wapas diye"
+  let multiOpsList: Array<{
+    customer_name: string;
+    amount: number;
+    intent: "ADD_CREDIT" | "ADD_PAYMENT";
+  }> | null = null;
+
+  if (
+    geminiInterpretation?.multiple_operations &&
+    geminiInterpretation.multiple_operations.length >= 2
+  ) {
+    multiOpsList = geminiInterpretation.multiple_operations.map((op) => ({
+      customer_name: op.customer_name,
+      amount: op.amount,
+      intent: op.transaction_type,
+    }));
+  } else {
+    const rawOps = detectMultipleOperations(transcript);
+    if (rawOps && rawOps.length >= 2) {
+      multiOpsList = rawOps
+        .filter((op) => op.customer_name && op.amount && op.amount > 0)
+        .map((op) => ({
+          customer_name: op.customer_name!,
+          amount: op.amount!,
+          intent: op.intent === "ADD_PAYMENT" ? "ADD_PAYMENT" : "ADD_CREDIT",
+        }));
+    }
+  }
+
+  if (multiOpsList && multiOpsList.length >= 2) {
+    const summaries = multiOpsList.map(
+      (op) =>
+        `${op.customer_name} ka ₹${op.amount} ${
+          op.intent === "ADD_CREDIT" ? "udhaar" : "jama"
+        }`
+    );
+
+    const multiConfirmReply =
+      detectedLang === "mr-IN"
+        ? `${summaries.join(" आणि ")} - दोन्ही नोंदी करायच्या का?`
+        : `${summaries.join(" aur ")} - dono likh loon?`;
 
     const compoundCommand: StructuredCommand = {
-      intent: op1.intent,
-      customer_name: op1.customer_name,
-      amount: op1.amount,
+      intent: multiOpsList[0].intent,
+      customer_name: multiOpsList[0].customer_name,
+      amount: multiOpsList[0].amount,
       description: null,
       missing_fields: [],
-      needs_clarification: false,
-      clarification_question: null,
+      needs_clarification: true,
+      clarification_question: multiConfirmReply,
       confidence: 0.95,
-      multiple_operations: multiOps,
+      multiple_operations: multiOpsList.map((op) => ({
+        intent: op.intent,
+        customer_name: op.customer_name,
+        amount: op.amount,
+        description: null,
+        missing_fields: [],
+        needs_clarification: false,
+        confidence: 0.95,
+      })),
     };
 
     return {
       success: true,
       command: compoundCommand,
-      reply,
-      updatedContext: {},
+      reply: multiConfirmReply,
+      updatedContext: {
+        lastQuestionType: "confirmation",
+        pendingMultipleOps: multiOpsList,
+      },
       engineUsed,
       evonAvailable,
+      geminiUsed: !!geminiInterpretation,
+      detectedLanguage: detectedLang,
+      totalPending: await getTotalPendingUdhaar(shopId),
+      activeCustomersCount: await getActiveCustomersCount(shopId),
+      transactions: await getRecentTransactions(5, shopId),
     };
   }
 
-  // 3. Contextual resolution (Handling follow-up responses)
+  // 4. Single Transaction contextual resolution
   const amountDetails = extractAmountWithDetails(transcript);
-  const currentAmount = amountDetails ? amountDetails.amount : null;
+  let currentAmount = amountDetails ? amountDetails.amount : null;
   let currentCustomer = extractCustomerName(transcript);
-  const classification = classifyTransactionIntent(transcript);
-  const intent = classification.intent;
 
-  // If customer is not explicitly mentioned but shopkeeper asks "uska kitna baaki hai" or gives an amount
-  if (!currentCustomer && context?.lastCustomerName) {
-    const lower = transcript.toLowerCase();
-    if (
-      lower.includes("uska") ||
-      lower.includes("uske") ||
-      lower.includes("unka") ||
-      lower.includes("unke") ||
-      lower.includes("tyacha") ||
-      lower.includes("tyanche") ||
-      lower.includes("उसका") ||
-      lower.includes("उसके") ||
-      lower.includes("उनका") ||
-      lower.includes("उनके") ||
-      lower.includes("त्याचा") ||
-      lower.includes("त्यांचे") ||
-      intent === "CHECK_BALANCE"
-    ) {
-      currentCustomer = context.lastCustomerName;
+  // Integrate Gemini's multi-modal audio interpretation:
+  if (geminiInterpretation) {
+    if (geminiInterpretation.amount !== null && geminiInterpretation.confidence >= 0.6) {
+      currentAmount = geminiInterpretation.amount;
+    }
+    if (geminiInterpretation.customer_name && geminiInterpretation.confidence >= 0.6) {
+      currentCustomer = geminiInterpretation.customer_name;
     }
   }
 
@@ -421,12 +903,12 @@ export async function parseShopkeeperCommand(
         if (resolvedAmount && resolvedAmount > 0) {
           // Record transaction into ledger
           if (resolvedIntent === "ADD_CREDIT") {
-            await recordTransaction(resolvedCustomer, "udhaar", resolvedAmount);
+            await recordTransaction(resolvedCustomer, "udhaar", resolvedAmount, undefined, shopId);
           } else {
-            await recordTransaction(resolvedCustomer, "jama", resolvedAmount);
+            await recordTransaction(resolvedCustomer, "jama", resolvedAmount, undefined, shopId);
           }
 
-          const balanceInfo = await getCustomerBalance(resolvedCustomer);
+          const balanceInfo = await getCustomerBalance(resolvedCustomer, shopId);
 
           const finalCommand: StructuredCommand = {
             intent: resolvedIntent,
@@ -453,9 +935,9 @@ export async function parseShopkeeperCommand(
             engineUsed,
             evonAvailable,
             customerBalance: balanceInfo.balance,
-            totalPending: await getTotalPendingUdhaar(),
-            activeCustomersCount: await getActiveCustomersCount(),
-            transactions: await getRecentTransactions(5),
+            totalPending: await getTotalPendingUdhaar(shopId),
+            activeCustomersCount: await getActiveCustomersCount(shopId),
+            transactions: await getRecentTransactions(5, shopId),
           };
         } else {
           // Customer is known, but amount still needed
@@ -480,9 +962,9 @@ export async function parseShopkeeperCommand(
             },
             engineUsed,
             evonAvailable,
-            totalPending: await getTotalPendingUdhaar(),
-            activeCustomersCount: await getActiveCustomersCount(),
-            transactions: await getRecentTransactions(5),
+            totalPending: await getTotalPendingUdhaar(shopId),
+            activeCustomersCount: await getActiveCustomersCount(shopId),
+            transactions: await getRecentTransactions(5, shopId),
           };
         }
       } else {
@@ -506,9 +988,9 @@ export async function parseShopkeeperCommand(
           },
           engineUsed,
           evonAvailable,
-          totalPending: await getTotalPendingUdhaar(),
-          activeCustomersCount: await getActiveCustomersCount(),
-          transactions: await getRecentTransactions(5),
+          totalPending: await getTotalPendingUdhaar(shopId),
+          activeCustomersCount: await getActiveCustomersCount(shopId),
+          transactions: await getRecentTransactions(5, shopId),
         };
       }
     }
@@ -520,12 +1002,12 @@ export async function parseShopkeeperCommand(
 
       // Record transaction into ledger!
       if (resolvedIntent === "ADD_CREDIT") {
-        await recordTransaction(resolvedCustomer, "udhaar", currentAmount);
+        await recordTransaction(resolvedCustomer, "udhaar", currentAmount, undefined, shopId);
       } else if (resolvedIntent === "ADD_PAYMENT") {
-        await recordTransaction(resolvedCustomer, "jama", currentAmount);
+        await recordTransaction(resolvedCustomer, "jama", currentAmount, undefined, shopId);
       }
 
-      const balanceInfo = await getCustomerBalance(resolvedCustomer);
+      const balanceInfo = await getCustomerBalance(resolvedCustomer, shopId);
 
       const finalCommand: StructuredCommand = {
         intent: resolvedIntent,
@@ -552,9 +1034,9 @@ export async function parseShopkeeperCommand(
         engineUsed,
         evonAvailable,
         customerBalance: balanceInfo.balance,
-        totalPending: await getTotalPendingUdhaar(),
-        activeCustomersCount: await getActiveCustomersCount(),
-        transactions: await getRecentTransactions(5),
+        totalPending: await getTotalPendingUdhaar(shopId),
+        activeCustomersCount: await getActiveCustomersCount(shopId),
+        transactions: await getRecentTransactions(5, shopId),
       };
     }
 
@@ -562,9 +1044,9 @@ export async function parseShopkeeperCommand(
     if (context.lastQuestionType === "customer_disambiguation") {
       const rawAns = transcript.trim();
       const extractedAns = extractCustomerName(transcript) || rawAns;
-      let match = await findCustomerMatch(extractedAns);
+      let match = await findCustomerMatch(extractedAns, shopId);
       if (match.status !== "exact_match" && match.status !== "single_match" && context.pendingCustomerName) {
-        match = await findCustomerMatch(`${context.pendingCustomerName} ${extractedAns}`);
+        match = await findCustomerMatch(`${context.pendingCustomerName} ${extractedAns}`, shopId);
       }
 
       if (match.status === "exact_match" || match.status === "single_match") {
@@ -572,7 +1054,7 @@ export async function parseShopkeeperCommand(
         const resolvedIntent = context.pendingIntent || "CHECK_BALANCE";
 
         if (resolvedIntent === "CHECK_BALANCE") {
-          const balanceInfo = await getCustomerBalance(resolvedCustomer);
+          const balanceInfo = await getCustomerBalance(resolvedCustomer, shopId);
           let balReply = "";
           if (!balanceInfo.exists || balanceInfo.balance === 0) {
             balReply = `${balanceInfo.displayName} ka koi baaki hisaab nahi hai. Balance ₹0 hai.`;
@@ -600,20 +1082,20 @@ export async function parseShopkeeperCommand(
             engineUsed,
             evonAvailable,
             customerBalance: balanceInfo.balance,
-            totalPending: await getTotalPendingUdhaar(),
-            activeCustomersCount: await getActiveCustomersCount(),
-            transactions: await getRecentTransactions(5),
+            totalPending: await getTotalPendingUdhaar(shopId),
+            activeCustomersCount: await getActiveCustomersCount(shopId),
+            transactions: await getRecentTransactions(5, shopId),
           };
         } else {
           // ADD_CREDIT or ADD_PAYMENT
           const resolvedAmount = context.pendingAmount;
           if (resolvedAmount && resolvedAmount > 0) {
             if (resolvedIntent === "ADD_CREDIT") {
-              await recordTransaction(resolvedCustomer, "udhaar", resolvedAmount);
+              await recordTransaction(resolvedCustomer, "udhaar", resolvedAmount, undefined, shopId);
             } else {
-              await recordTransaction(resolvedCustomer, "jama", resolvedAmount);
+              await recordTransaction(resolvedCustomer, "jama", resolvedAmount, undefined, shopId);
             }
-            const balanceInfo = await getCustomerBalance(resolvedCustomer);
+            const balanceInfo = await getCustomerBalance(resolvedCustomer, shopId);
 
             let addReply = "";
             if (resolvedIntent === "ADD_CREDIT") {
@@ -645,10 +1127,11 @@ export async function parseShopkeeperCommand(
               },
               engineUsed,
               evonAvailable,
+              detectedLanguage: detectedLang,
               customerBalance: balanceInfo.balance,
-              totalPending: await getTotalPendingUdhaar(),
-              activeCustomersCount: await getActiveCustomersCount(),
-              transactions: await getRecentTransactions(5),
+              totalPending: await getTotalPendingUdhaar(shopId),
+              activeCustomersCount: await getActiveCustomersCount(shopId),
+              transactions: await getRecentTransactions(5, shopId),
             };
           }
         }
@@ -661,7 +1144,7 @@ export async function parseShopkeeperCommand(
       const resolvedIntent = context.pendingIntent || "ADD_CREDIT";
 
       if (resolvedIntent === "CHECK_BALANCE") {
-        const matchResult = await findCustomerMatch(targetCustomer);
+        const matchResult = await findCustomerMatch(targetCustomer, shopId);
 
         if (matchResult.status === "ambiguous") {
           const qToken = matchResult.queryFirstToken.charAt(0).toUpperCase() + matchResult.queryFirstToken.slice(1);
@@ -685,9 +1168,9 @@ export async function parseShopkeeperCommand(
             },
             engineUsed,
             evonAvailable,
-            totalPending: await getTotalPendingUdhaar(),
-            activeCustomersCount: await getActiveCustomersCount(),
-            transactions: await getRecentTransactions(5),
+            totalPending: await getTotalPendingUdhaar(shopId),
+            activeCustomersCount: await getActiveCustomersCount(shopId),
+            transactions: await getRecentTransactions(5, shopId),
           };
         }
 
@@ -711,14 +1194,14 @@ export async function parseShopkeeperCommand(
             },
             engineUsed,
             evonAvailable,
-            totalPending: await getTotalPendingUdhaar(),
-            activeCustomersCount: await getActiveCustomersCount(),
-            transactions: await getRecentTransactions(5),
+            totalPending: await getTotalPendingUdhaar(shopId),
+            activeCustomersCount: await getActiveCustomersCount(shopId),
+            transactions: await getRecentTransactions(5, shopId),
           };
         }
 
         const canonicalName = matchResult.matchedName || targetCustomer;
-        const balanceInfo = await getCustomerBalance(canonicalName);
+        const balanceInfo = await getCustomerBalance(canonicalName, shopId);
         let balReply = "";
         if (!balanceInfo.exists || balanceInfo.balance === 0) {
           balReply = `${balanceInfo.displayName} ka koi baaki hisaab nahi hai. Balance ₹0 hai.`;
@@ -746,27 +1229,27 @@ export async function parseShopkeeperCommand(
           engineUsed,
           evonAvailable,
           customerBalance: balanceInfo.balance,
-          totalPending: await getTotalPendingUdhaar(),
-          activeCustomersCount: await getActiveCustomersCount(),
-          transactions: await getRecentTransactions(5),
+          totalPending: await getTotalPendingUdhaar(shopId),
+          activeCustomersCount: await getActiveCustomersCount(shopId),
+          transactions: await getRecentTransactions(5, shopId),
         };
       }
 
       const resolvedAmount = context.pendingAmount;
 
       if (resolvedAmount && resolvedAmount > 0) {
-        const matchResult = await findCustomerMatch(targetCustomer);
+        const matchResult = await findCustomerMatch(targetCustomer, shopId);
         const finalCustomer = (matchResult.status === "exact_match" || matchResult.status === "single_match")
           ? matchResult.matchedName!
           : targetCustomer;
 
         if (resolvedIntent === "ADD_CREDIT") {
-          await recordTransaction(finalCustomer, "udhaar", resolvedAmount);
+          await recordTransaction(finalCustomer, "udhaar", resolvedAmount, undefined, shopId);
         } else if (resolvedIntent === "ADD_PAYMENT") {
-          await recordTransaction(finalCustomer, "jama", resolvedAmount);
+          await recordTransaction(finalCustomer, "jama", resolvedAmount, undefined, shopId);
         }
 
-        const balanceInfo = await getCustomerBalance(finalCustomer);
+        const balanceInfo = await getCustomerBalance(finalCustomer, shopId);
 
         const finalCommand: StructuredCommand = {
           intent: resolvedIntent,
@@ -793,9 +1276,9 @@ export async function parseShopkeeperCommand(
           engineUsed,
           evonAvailable,
           customerBalance: balanceInfo.balance,
-          totalPending: await getTotalPendingUdhaar(),
-          activeCustomersCount: await getActiveCustomersCount(),
-          transactions: await getRecentTransactions(5),
+          totalPending: await getTotalPendingUdhaar(shopId),
+          activeCustomersCount: await getActiveCustomersCount(shopId),
+          transactions: await getRecentTransactions(5, shopId),
         };
       }
 
@@ -821,9 +1304,9 @@ export async function parseShopkeeperCommand(
         },
         engineUsed,
         evonAvailable,
-        totalPending: await getTotalPendingUdhaar(),
-        activeCustomersCount: await getActiveCustomersCount(),
-        transactions: await getRecentTransactions(5),
+        totalPending: await getTotalPendingUdhaar(shopId),
+        activeCustomersCount: await getActiveCustomersCount(shopId),
+        transactions: await getRecentTransactions(5, shopId),
       };
     }
   }
@@ -852,9 +1335,9 @@ export async function parseShopkeeperCommand(
       },
       engineUsed,
       evonAvailable,
-      totalPending: await getTotalPendingUdhaar(),
-      activeCustomersCount: await getActiveCustomersCount(),
-      transactions: await getRecentTransactions(5),
+      totalPending: await getTotalPendingUdhaar(shopId),
+      activeCustomersCount: await getActiveCustomersCount(shopId),
+      transactions: await getRecentTransactions(5, shopId),
     };
   }
 
@@ -867,7 +1350,7 @@ export async function parseShopkeeperCommand(
   };
 
   if (intent === "CHECK_TOTAL") {
-    const total = await getTotalPendingUdhaar();
+    const total = await getTotalPendingUdhaar(shopId);
     reply = `Dukaan ka kul baaki udhaar ₹${total.toLocaleString("en-IN")} hai.`;
     return {
       success: true,
@@ -885,8 +1368,8 @@ export async function parseShopkeeperCommand(
       engineUsed,
       evonAvailable,
       totalPending: total,
-      activeCustomersCount: await getActiveCustomersCount(),
-      transactions: await getRecentTransactions(5),
+      activeCustomersCount: await getActiveCustomersCount(shopId),
+      transactions: await getRecentTransactions(5, shopId),
     };
   }
 
@@ -915,14 +1398,14 @@ export async function parseShopkeeperCommand(
         updatedContext,
         engineUsed,
         evonAvailable,
-        totalPending: await getTotalPendingUdhaar(),
-        activeCustomersCount: await getActiveCustomersCount(),
-        transactions: await getRecentTransactions(5),
+        totalPending: await getTotalPendingUdhaar(shopId),
+        activeCustomersCount: await getActiveCustomersCount(shopId),
+        transactions: await getRecentTransactions(5, shopId),
       };
     }
 
     // Match customer name against actual records in the ledger
-    const matchResult = await findCustomerMatch(targetCustomer);
+    const matchResult = await findCustomerMatch(targetCustomer, shopId);
 
     // If multiple customers have similar names, ask: "Kaunse Suresh?"
     if (matchResult.status === "ambiguous") {
@@ -948,9 +1431,9 @@ export async function parseShopkeeperCommand(
         updatedContext,
         engineUsed,
         evonAvailable,
-        totalPending: await getTotalPendingUdhaar(),
-        activeCustomersCount: await getActiveCustomersCount(),
-        transactions: await getRecentTransactions(5),
+        totalPending: await getTotalPendingUdhaar(shopId),
+        activeCustomersCount: await getActiveCustomersCount(shopId),
+        transactions: await getRecentTransactions(5, shopId),
       };
     }
 
@@ -976,15 +1459,15 @@ export async function parseShopkeeperCommand(
         updatedContext,
         engineUsed,
         evonAvailable,
-        totalPending: await getTotalPendingUdhaar(),
-        activeCustomersCount: await getActiveCustomersCount(),
-        transactions: await getRecentTransactions(5),
+        totalPending: await getTotalPendingUdhaar(shopId),
+        activeCustomersCount: await getActiveCustomersCount(shopId),
+        transactions: await getRecentTransactions(5, shopId),
       };
     }
 
     // Single matched customer found in ledger
     const matchedCustomerName = matchResult.matchedName || targetCustomer;
-    const balanceInfo = await getCustomerBalance(matchedCustomerName);
+    const balanceInfo = await getCustomerBalance(matchedCustomerName, shopId);
 
     if (!balanceInfo.exists || balanceInfo.balance === 0) {
       reply = `${balanceInfo.displayName} ka koi baaki hisaab nahi hai. Balance ₹0 hai.`;
@@ -1013,16 +1496,16 @@ export async function parseShopkeeperCommand(
       engineUsed,
       evonAvailable,
       customerBalance: balanceInfo.balance,
-      totalPending: await getTotalPendingUdhaar(),
-      activeCustomersCount: await getActiveCustomersCount(),
-      transactions: await getRecentTransactions(5),
+      totalPending: await getTotalPendingUdhaar(shopId),
+      activeCustomersCount: await getActiveCustomersCount(shopId),
+      transactions: await getRecentTransactions(5, shopId),
     };
   }
 
   if (intent === "ADD_CREDIT" || intent === "ADD_PAYMENT") {
     // Check if customer name is ambiguous (multiple matching customers in ledger)
     if (currentCustomer) {
-      const matchResult = await findCustomerMatch(currentCustomer);
+      const matchResult = await findCustomerMatch(currentCustomer, shopId);
       if (matchResult.status === "ambiguous") {
         const qToken = matchResult.queryFirstToken.charAt(0).toUpperCase() + matchResult.queryFirstToken.slice(1);
         clarification_question = `Kaunse ${qToken}?`;
@@ -1047,9 +1530,9 @@ export async function parseShopkeeperCommand(
           updatedContext,
           engineUsed,
           evonAvailable,
-          totalPending: await getTotalPendingUdhaar(),
-          activeCustomersCount: await getActiveCustomersCount(),
-          transactions: await getRecentTransactions(5),
+          totalPending: await getTotalPendingUdhaar(shopId),
+          activeCustomersCount: await getActiveCustomersCount(shopId),
+          transactions: await getRecentTransactions(5, shopId),
         };
       }
     }
@@ -1075,52 +1558,49 @@ export async function parseShopkeeperCommand(
     } else {
       // Both customer and amount are verified!
       // Match against ledger canonical name if exists, else use provided name
-      const matchResult = await findCustomerMatch(currentCustomer!);
+      const matchResult = await findCustomerMatch(currentCustomer!, shopId);
       const finalCustomer = (matchResult.status === "exact_match" || matchResult.status === "single_match")
         ? matchResult.matchedName!
         : currentCustomer!;
 
-      if (intent === "ADD_CREDIT") {
-        await recordTransaction(finalCustomer, "udhaar", currentAmount!);
-      } else {
-        await recordTransaction(finalCustomer, "jama", currentAmount!);
-      }
-
-      const balanceInfo = await getCustomerBalance(finalCustomer);
-      updatedContext.lastCustomerName = balanceInfo.displayName;
-
-      if (intent === "ADD_CREDIT") {
-        reply = `Ho gaya! ${balanceInfo.displayName} ka ₹${currentAmount!.toLocaleString("en-IN")} udhaar likh liya hai. Ab kul baaki ₹${balanceInfo.balance.toLocaleString("en-IN")} hai.`;
-      } else {
-        if (balanceInfo.balance > 0) {
-          reply = `Theek hai! ${balanceInfo.displayName} ke ₹${currentAmount!.toLocaleString("en-IN")} jama kar liye. Ab baaki hisaab ₹${balanceInfo.balance.toLocaleString("en-IN")} hai.`;
-        } else if (balanceInfo.balance === 0) {
-          reply = `Theek hai! ${balanceInfo.displayName} ke ₹${currentAmount!.toLocaleString("en-IN")} jama kar liye. Poora hisaab barabar ho gaya hai (₹0 baaki).`;
-        } else {
-          reply = `Theek hai! ${balanceInfo.displayName} ke ₹${currentAmount!.toLocaleString("en-IN")} jama kar liye. Unka ₹${Math.abs(balanceInfo.balance).toLocaleString("en-IN")} advance (jama) hai, koi udhaar baaki nahi hai.`;
-        }
-      }
+      // Transaction Safety: Always ask for explicit confirmation before committing to Supabase
+      const confirmReply =
+        detectedLang === "mr-IN"
+          ? (intent === "ADD_CREDIT"
+              ? `${finalCustomer} चे ₹${currentAmount!.toLocaleString("en-IN")} उधार नोंदवायचे का? बरोबर आहे?`
+              : `${finalCustomer} चे ₹${currentAmount!.toLocaleString("en-IN")} जमा करायचे का? बरोबर आहे?`)
+          : (intent === "ADD_CREDIT"
+              ? `${finalCustomer} ka ₹${currentAmount!.toLocaleString("en-IN")} udhaar likhna hai. Sahi hai?`
+              : `${finalCustomer} ke ₹${currentAmount!.toLocaleString("en-IN")} jama karne hain. Sahi hai?`);
 
       return {
         success: true,
         command: {
           intent,
-          customer_name: balanceInfo.displayName,
+          customer_name: finalCustomer,
           amount: currentAmount,
           description: null,
           missing_fields: [],
-          needs_clarification: false,
-          clarification_question: null,
-          confidence: amountDetails?.confidence ?? 0.96,
+          needs_clarification: true,
+          clarification_question: "Sahi hai?",
+          confidence: geminiInterpretation?.confidence ?? amountDetails?.confidence ?? 0.96,
         },
-        reply,
-        updatedContext,
+        reply: confirmReply,
+        updatedContext: {
+          pendingCustomerName: finalCustomer,
+          pendingAmount: currentAmount,
+          pendingIntent: intent,
+          lastQuestionType: "confirmation",
+          lastCustomerName: finalCustomer,
+        },
         engineUsed,
         evonAvailable,
-        customerBalance: balanceInfo.balance,
-        totalPending: await getTotalPendingUdhaar(),
-        activeCustomersCount: await getActiveCustomersCount(),
-        transactions: await getRecentTransactions(5),
+        geminiUsed: !!geminiInterpretation,
+        correctedTranscript: geminiInterpretation?.corrected_transcript,
+        detectedLanguage: detectedLang,
+        totalPending: await getTotalPendingUdhaar(shopId),
+        activeCustomersCount: await getActiveCustomersCount(shopId),
+        transactions: await getRecentTransactions(5, shopId),
       };
     }
 
@@ -1142,9 +1622,9 @@ export async function parseShopkeeperCommand(
       updatedContext,
       engineUsed,
       evonAvailable,
-      totalPending: await getTotalPendingUdhaar(),
-      activeCustomersCount: await getActiveCustomersCount(),
-      transactions: await getRecentTransactions(5),
+      totalPending: await getTotalPendingUdhaar(shopId),
+      activeCustomersCount: await getActiveCustomersCount(shopId),
+      transactions: await getRecentTransactions(5, shopId),
     };
   }
 

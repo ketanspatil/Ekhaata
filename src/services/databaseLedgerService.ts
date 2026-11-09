@@ -1,7 +1,11 @@
 /**
- * Database Ledger Service (Module 5: Permanent Database & Financial Ledger)
+ * Database Ledger Service (Module 5+6: Permanent Database & Financial Ledger)
  * Backed by Supabase PostgreSQL with accurate integer paise arithmetic,
  * atomic transactions, and dynamic balance calculation from transaction history.
+ *
+ * All functions require an explicit shopId — the hardcoded DEFAULT_SHOP_ID
+ * is preserved only as a last-resort dev fallback and is never used when
+ * the user is authenticated (Module 6+).
  */
 import { getSupabaseClient, checkSupabaseConfig } from "./supabaseClient";
 import {
@@ -12,7 +16,8 @@ import {
 } from "@/utils/nameNormalizer";
 import { Transaction } from "@/types";
 
-// Default shop UUID for development isolation (prior to Module 6 Auth)
+// Development-only fallback shop ID (used only when no authenticated user is present)
+// Preserved for JSON-fallback path; never used when user is authenticated.
 export const DEFAULT_SHOP_ID = "00000000-0000-0000-0000-000000000001";
 
 export interface DBCustomer {
@@ -52,7 +57,8 @@ export interface DBCustomerBalanceInfo {
 }
 
 /**
- * Ensures the default shop exists in the database.
+ * Ensures the development default shop exists.
+ * Only called in legacy/fallback paths — not used when user is authenticated.
  */
 export async function ensureDefaultShopExists(): Promise<string> {
   const supabase = getSupabaseClient();
@@ -66,8 +72,7 @@ export async function ensureDefaultShopExists(): Promise<string> {
   const { error } = await supabase.from("shops").upsert(
     {
       id: DEFAULT_SHOP_ID,
-      name: "Sharma Kirana Store",
-      owner_phone: "+919876543210",
+      shop_name: "Sharma Kirana Store",
       currency: "INR",
     },
     { onConflict: "id" }
@@ -145,7 +150,9 @@ export async function dbFindOrCreateCustomer(
     throw new Error("Supabase is not configured.");
   }
 
-  await ensureDefaultShopExists();
+  if (!shopId) {
+    throw new Error("shopId is required to create a customer.");
+  }
 
   const formattedName = formatCustomerNameForDisplay(customerName);
   const normalized = normalizeCustomerName(customerName);
@@ -165,7 +172,7 @@ export async function dbFindOrCreateCustomer(
     .from("customers")
     .insert({
       shop_id: shopId,
-      name: formattedName,
+      full_name: formattedName,
       normalized_name: normalized,
       phone: phone || null,
     })
@@ -221,19 +228,34 @@ export async function dbRecordTransaction(
     options?.idempotencyKey ||
     `tx-${customer.id}-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
 
-  const { data, error } = await supabase
+  const txRecord: Record<string, unknown> = {
+    shop_id: shopId,
+    customer_id: customer.id,
+    type,
+    amount: normalizedRupees,
+    idempotency_key: idempotencyKey,
+    description: options?.description || null,
+  };
+
+  let { data, error } = await supabase
     .from("transactions")
-    .insert({
-      shop_id: shopId,
-      customer_id: customer.id,
-      type,
-      amount: normalizedRupees,
-      amount_paise: amountPaise,
-      idempotency_key: idempotencyKey,
-      description: options?.description || null,
-    })
+    .insert(txRecord)
     .select()
     .single();
+
+  // If column amount_paise exists as non-generated in some environments or fails, retry without or with it
+  if (error && error.message.includes('null value in column "amount_paise"')) {
+    const { data: retryData, error: retryErr } = await supabase
+      .from("transactions")
+      .insert({
+        ...txRecord,
+        amount_paise: amountPaise,
+      })
+      .select()
+      .single();
+    data = retryData;
+    error = retryErr;
+  }
 
   if (error) {
     throw new Error(`Failed to record transaction: ${error.message}`);
@@ -270,10 +292,10 @@ export async function dbReverseTransaction(
     throw new Error(`Original transaction not found: ${fetchErr?.message}`);
   }
 
-  // A reversal inverts the transaction effect:
-  // If original was udhaar (credit), reversal is payment (jama) of identical amount
-  // If original was jama, reversal is udhaar of identical amount
-  const reverseType = original.type === "udhaar" ? "jama" : "udhaar";
+  const reverseType =
+    original.type === "udhaar" || original.type === "CREDIT"
+      ? "jama"
+      : "udhaar";
 
   const { data: reversal, error: insertErr } = await supabase
     .from("transactions")
@@ -282,7 +304,6 @@ export async function dbReverseTransaction(
       customer_id: original.customer_id,
       type: reverseType,
       amount: original.amount,
-      amount_paise: original.amount_paise,
       idempotency_key: `reversal-${transactionId}-${Date.now()}`,
       description: `Reversal of tx ${transactionId}: ${reason || "Correction"}`,
       reversal_of_id: transactionId,
@@ -295,6 +316,65 @@ export async function dbReverseTransaction(
   }
 
   return reversal;
+}
+
+/**
+ * Retrieves the most recent eligible transaction for reversal in the given shop.
+ */
+export async function dbGetLastReversibleTransaction(
+  shopId: string = DEFAULT_SHOP_ID
+): Promise<{
+  id: string;
+  customer_id: string;
+  customer_name: string;
+  type: string;
+  amount: number;
+  created_at: string;
+} | null> {
+  const supabase = getSupabaseClient();
+  if (!supabase) return null;
+
+  // Find last transaction in this shop that is not itself a reversal
+  const { data: txs, error } = await supabase
+    .from("transactions")
+    .select("id, customer_id, type, amount, created_at, reversal_of_id, customers(name)")
+    .eq("shop_id", shopId)
+    .is("reversal_of_id", null)
+    .order("created_at", { ascending: false })
+    .limit(5);
+
+  if (error || !txs || txs.length === 0) return null;
+
+  // Filter out any transaction that has already been reversed by another transaction
+  for (const t of txs) {
+    const { data: revCheck } = await supabase
+      .from("transactions")
+      .select("id")
+      .eq("reversal_of_id", t.id)
+      .maybeSingle();
+
+    if (!revCheck) {
+      interface RowWithCust {
+        id: string;
+        customer_id: string;
+        type: string;
+        amount: number;
+        created_at: string;
+        customers: { name: string } | null;
+      }
+      const item = t as unknown as RowWithCust;
+      return {
+        id: item.id,
+        customer_id: item.customer_id,
+        customer_name: item.customers?.name || "Grahak",
+        type: item.type,
+        amount: Number(item.amount),
+        created_at: item.created_at,
+      };
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -337,10 +417,9 @@ export async function dbGetCustomerBalance(
 
   const customer = match.customerRecord;
 
-  // Retrieve all transactions for this customer
   const { data: txs, error } = await supabase
     .from("transactions")
-    .select("type, amount_paise")
+    .select("type, amount, amount_paise")
     .eq("customer_id", customer.id);
 
   if (error || !txs) {
@@ -363,10 +442,15 @@ export async function dbGetCustomerBalance(
   let totalPaymentPaise = 0;
 
   for (const t of txs) {
-    if (t.type === "udhaar") {
-      totalCreditPaise += Number(t.amount_paise);
-    } else if (t.type === "jama") {
-      totalPaymentPaise += Number(t.amount_paise);
+    const paise =
+      t.amount_paise != null
+        ? Number(t.amount_paise)
+        : Math.round(Number(t.amount || 0) * 100);
+    const typeUpper = (t.type || "").toUpperCase();
+    if (typeUpper === "UDHAAR" || typeUpper === "CREDIT") {
+      totalCreditPaise += paise;
+    } else if (typeUpper === "JAMA" || typeUpper === "PAYMENT") {
+      totalPaymentPaise += paise;
     }
   }
 
@@ -388,7 +472,6 @@ export async function dbGetCustomerBalance(
 
 /**
  * Calculates total pending udhaar across all customers in the shop.
- * Total pending equals the sum of all individual positive balances.
  */
 export async function dbGetTotalPendingUdhaar(
   shopId: string = DEFAULT_SHOP_ID
@@ -405,14 +488,22 @@ export async function dbGetTotalPendingUdhaar(
   for (const c of customers) {
     const { data: txs } = await supabase
       .from("transactions")
-      .select("type, amount_paise")
+      .select("type, amount, amount_paise")
       .eq("customer_id", c.id);
 
     if (txs) {
       let custBalancePaise = 0;
       for (const t of txs) {
-        if (t.type === "udhaar") custBalancePaise += Number(t.amount_paise);
-        else if (t.type === "jama") custBalancePaise -= Number(t.amount_paise);
+        const paise =
+          t.amount_paise != null
+            ? Number(t.amount_paise)
+            : Math.round(Number(t.amount || 0) * 100);
+        const typeUpper = (t.type || "").toUpperCase();
+        if (typeUpper === "UDHAAR" || typeUpper === "CREDIT") {
+          custBalancePaise += paise;
+        } else if (typeUpper === "JAMA" || typeUpper === "PAYMENT") {
+          custBalancePaise -= paise;
+        }
       }
       if (custBalancePaise > 0) {
         totalPendingPaise += custBalancePaise;
@@ -432,10 +523,10 @@ export async function dbGetTotalPendingUdhaar(
  */
 export async function dbGetRecentTransactions(
   limit = 10,
-  shopId: string = DEFAULT_SHOP_ID
+  shopId?: string
 ): Promise<Transaction[]> {
   const supabase = getSupabaseClient();
-  if (!supabase) return [];
+  if (!supabase || !shopId) return [];
 
   const { data, error } = await supabase
     .from("transactions")
@@ -454,15 +545,21 @@ export async function dbGetRecentTransactions(
     customers: { name: string } | null;
   }
 
-  return (data as unknown as TransactionWithCustomer[]).map((t) => ({
-    id: t.id,
-    customerName: t.customers?.name || "Grahak",
-    type: t.type === "jama" ? "jama" : "udhaar",
-    amount: Number(t.amount),
-    time: new Date(t.created_at).toLocaleTimeString("en-IN", {
-      hour: "numeric",
-      minute: "2-digit",
-      hour12: true,
-    }),
-  }));
+  return (data as unknown as TransactionWithCustomer[]).map((t) => {
+    const typeUpper = (t.type || "").toUpperCase();
+    const normalizedType: "udhaar" | "jama" =
+      typeUpper === "JAMA" || typeUpper === "PAYMENT" ? "jama" : "udhaar";
+
+    return {
+      id: t.id,
+      customerName: t.customers?.name || "Grahak",
+      type: normalizedType,
+      amount: Number(t.amount),
+      time: new Date(t.created_at).toLocaleTimeString("en-IN", {
+        hour: "numeric",
+        minute: "2-digit",
+        hour12: true,
+      }),
+    };
+  });
 }

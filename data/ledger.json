@@ -1,5 +1,89 @@
 [
   {
+    "id": "tx-1794218432336-kk87",
+    "customerName": "रमेश",
+    "type": "udhaar",
+    "amount": 100,
+    "time": "3:30 pm"
+  },
+  {
+    "id": "tx-1794218373871-ejkr",
+    "customerName": "रमेश",
+    "type": "jama",
+    "amount": 500,
+    "time": "3:29 pm"
+  },
+  {
+    "id": "tx-1794214706688-61wn",
+    "customerName": "करने",
+    "type": "udhaar",
+    "amount": 200,
+    "time": "2:28 pm"
+  },
+  {
+    "id": "tx-1794214578119-09zo",
+    "customerName": "अनीता बाई",
+    "type": "jama",
+    "amount": 500,
+    "time": "2:26 pm"
+  },
+  {
+    "id": "tx-1794214530869-133u",
+    "customerName": "रमेश",
+    "type": "udhaar",
+    "amount": 500,
+    "time": "2:25 pm"
+  },
+  {
+    "id": "tx-1794204289244-g6re",
+    "customerName": "रमेश",
+    "type": "jama",
+    "amount": 200,
+    "time": "11:34 am"
+  },
+  {
+    "id": "tx-1794204168585-np11",
+    "customerName": "रमेश",
+    "type": "udhaar",
+    "amount": 100,
+    "time": "11:32 am"
+  },
+  {
+    "id": "tx-1794202418577-qwgp",
+    "customerName": "रमेश",
+    "type": "udhaar",
+    "amount": 100,
+    "time": "11:03 am"
+  },
+  {
+    "id": "tx-1794201160613-w7f8",
+    "customerName": "रमेश",
+    "type": "udhaar",
+    "amount": 100,
+    "time": "10:42 am"
+  },
+  {
+    "id": "tx-1794201139796-9qcw",
+    "customerName": "रमेश",
+    "type": "udhaar",
+    "amount": 100,
+    "time": "10:42 am"
+  },
+  {
+    "id": "tx-1794201110655-alr1",
+    "customerName": "रमेश",
+    "type": "jama",
+    "amount": 100,
+    "time": "10:41 am"
+  },
+  {
+    "id": "tx-1794143896592-b6ll",
+    "customerName": "रमेश",
+    "type": "udhaar",
+    "amount": 400,
+    "time": "6:48 pm"
+  },
+  {
     "id": "tx-1794049260645-7194",
     "customerName": "रमेश",
     "type": "udhaar",

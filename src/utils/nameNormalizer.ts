@@ -244,8 +244,14 @@ export function isTokenMatch(tokenA: string, tokenB: string): boolean {
   if (!tokenA || !tokenB) return false;
   if (tokenA === tokenB) return true;
 
+  // Check token match: must start with the same initial letter!
+  // Surnames and first names must never cross initial consonant boundaries (e.g. Ramesh vs Yogesh must never match)
+  if (tokenA[0] !== tokenB[0]) {
+    return false;
+  }
+
   // If length is at least 4 and Levenshtein distance is 1 (e.g. "patil" vs "patle", "shinde" vs "shindi")
-  if (tokenA[0] === tokenB[0] && Math.abs(tokenA.length - tokenB.length) <= 1 && Math.min(tokenA.length, tokenB.length) >= 4) {
+  if (Math.abs(tokenA.length - tokenB.length) <= 1 && Math.min(tokenA.length, tokenB.length) >= 4) {
     if (levenshteinDistance(tokenA, tokenB) <= 1) {
       return true;
     }

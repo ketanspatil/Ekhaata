@@ -9,26 +9,40 @@ import {
 } from "@/components/ConversationArea";
 import { RecentActivity } from "@/components/RecentActivity";
 import { VoiceRecorder } from "@/components/VoiceRecorder";
+import { useAuth } from "@/hooks/useAuth";
+import { useRouter } from "next/navigation";
 import {
   ChatMessage,
   ConversationContext,
   ConversationResponse,
   Transaction,
 } from "@/types";
+import { Loader2 } from "lucide-react";
 
 export default function Home() {
+  const { user, session, isLoading: authLoading, isAuthenticated, signOut } = useAuth();
+  const router = useRouter();
+
   const [messages, setMessages] = useState<ChatMessage[]>(
     DEFAULT_SAMPLE_CONVERSATION
   );
   const [conversationContext, setConversationContext] =
     useState<ConversationContext>({});
   const [isThinking, setIsThinking] = useState(false);
-  const [totalPending, setTotalPending] = useState<number>(1250);
-  const [activeCustomersCount, setActiveCustomersCount] = useState<number>(2);
+  const [totalPending, setTotalPending] = useState<number>(0);
+  const [activeCustomersCount, setActiveCustomersCount] = useState<number>(0);
   const [recentTransactions, setRecentTransactions] = useState<Transaction[]>([]);
   const [activePlayingId, setActivePlayingId] = useState<string | null>(null);
+  const [isOnline, setIsOnline] = useState<boolean>(true);
 
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  // Redirect unauthenticated users to login
+  useEffect(() => {
+    if (!authLoading && !isAuthenticated) {
+      router.replace("/login");
+    }
+  }, [authLoading, isAuthenticated, router]);
 
   // Stop any currently playing TTS audio on unmount
   useEffect(() => {
@@ -40,9 +54,44 @@ export default function Home() {
     };
   }, []);
 
-  // Fetch real ledger state on initial mount
+  // Check backend & API connectivity periodically
   useEffect(() => {
-    fetch("/api/conversation")
+    const checkHealth = async () => {
+      try {
+        const res = await fetch("/api/health");
+        if (res.ok) {
+          const data = await res.json();
+          setIsOnline(data.status === "online");
+        } else {
+          setIsOnline(false);
+        }
+      } catch {
+        setIsOnline(false);
+      }
+    };
+
+    checkHealth();
+    const interval = setInterval(checkHealth, 30000);
+    return () => clearInterval(interval);
+  }, []);
+
+  /**
+   * Returns Authorization header value with the user's access token.
+   * This lets API routes derive shop_id from the authenticated session
+   * without trusting any client-supplied value.
+   */
+  const getAuthHeader = (): Record<string, string> => {
+    if (session?.access_token) {
+      return { Authorization: `Bearer ${session.access_token}` };
+    }
+    return {};
+  };
+
+  // Fetch real ledger state on initial mount (after auth is ready)
+  useEffect(() => {
+    if (!isAuthenticated || authLoading) return;
+
+    fetch("/api/conversation", { headers: getAuthHeader() })
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (data) {
@@ -60,13 +109,15 @@ export default function Home() {
       .catch((err) => {
         console.warn("Could not fetch initial ledger:", err);
       });
-  }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAuthenticated, authLoading]);
 
   // Synthesize and play speech via Gnani Timbre TTS
   const playAssistantSpeech = async (
     messageId: string,
     text: string,
-    cachedAudioUrl?: string | null
+    cachedAudioUrl?: string | null,
+    languageCode?: string
   ) => {
     // Stop any ongoing audio playback
     if (currentAudioRef.current) {
@@ -86,6 +137,8 @@ export default function Home() {
           )
         );
 
+        const targetLang = languageCode || "hi-IN";
+
         const res = await fetch("/api/tts?format=json", {
           method: "POST",
           headers: {
@@ -93,7 +146,7 @@ export default function Home() {
           },
           body: JSON.stringify({
             text,
-            language: "hi-IN",
+            language: targetLang,
             voice: "Shivani",
           }),
         });
@@ -149,7 +202,12 @@ export default function Home() {
 
   const handleTranscribe = async (
     transcript: string,
-    detectedLanguage?: string
+    detectedLanguage?: string,
+    audioData?: {
+      audioBlob: Blob;
+      audioBase64: string;
+      mimeType: string;
+    }
   ) => {
     let langLabel = "Code-mix";
     if (detectedLanguage?.includes("mr")) langLabel = "मराठी";
@@ -175,15 +233,19 @@ export default function Home() {
     setIsThinking(true);
 
     try {
-      // 2. Send transcript & existing conversation context to conversation engine
+      // 2. Send transcript, audio, and existing conversation context to conversation engine
+      //    Include auth header so the API can derive the user's shop_id securely
       const res = await fetch("/api/conversation", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          ...getAuthHeader(),
         },
         body: JSON.stringify({
           transcript,
           context: conversationContext,
+          audioBase64: audioData?.audioBase64 || null,
+          audioMimeType: audioData?.mimeType || null,
         }),
       });
 
@@ -220,12 +282,12 @@ export default function Home() {
 
         setMessages((prev) => [...prev, assistantMsg]);
 
-        // 3. Automatically play Ekhaata response speech using Gnani Timbre TTS
-        playAssistantSpeech(assistantMsgId, data.reply);
+        // 3. Automatically play Ekhaata response speech using Gnani Timbre TTS with detected language
+        playAssistantSpeech(assistantMsgId, data.reply, null, data.detectedLanguage);
       } else {
         // Fallback message on error
         const errId = `ekhaata-err-${Date.now()}`;
-        const errorReplyText = "Samajh nahi aaya, kripya dobara bolein.";
+        const errorReplyText = data?.reply || "Samajh nahi aaya, kripya dobara bolein.";
         const errorReply: ChatMessage = {
           id: errId,
           sender: "ekhaata",
@@ -238,7 +300,7 @@ export default function Home() {
           audioNote: "Ekhaata Intelligence • Error",
         };
         setMessages((prev) => [...prev, errorReply]);
-        playAssistantSpeech(errId, errorReplyText);
+        playAssistantSpeech(errId, errorReplyText, null, data?.detectedLanguage);
       }
     } catch (err) {
       console.error("Conversation engine error:", err);
@@ -262,6 +324,20 @@ export default function Home() {
     }
   };
 
+  // Show loading while auth is initialising
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-[#F3F0E9] flex items-center justify-center">
+        <Loader2 className="w-8 h-8 text-[#134E39] animate-spin" />
+      </div>
+    );
+  }
+
+  // Don't render dashboard for unauthenticated users (redirect is in progress)
+  if (!isAuthenticated) {
+    return null;
+  }
+
   return (
     <main className="min-h-screen bg-[#F3F0E9] flex flex-col justify-center items-center sm:py-6 sm:px-4">
       {/* Mobile Device Frame for Desktop & Responsive Viewport */}
@@ -271,8 +347,13 @@ export default function Home() {
           <div className="w-20 h-1.5 bg-stone-300 rounded-full"></div>
         </div>
 
-        {/* 1. Header */}
-        <Header storeName="Sharma Kirana Store" />
+        {/* 1. Header — shows authenticated shop name, logout button and online indicator */}
+        <Header
+          storeName={user?.shopName || "Meri Dukaan"}
+          onSignOut={signOut}
+          userEmail={user?.email}
+          isOnline={isOnline}
+        />
 
         {/* Scrollable Main Content Area */}
         <div className="flex-1 overflow-y-auto pb-3 flex flex-col">

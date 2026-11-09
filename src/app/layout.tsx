@@ -1,9 +1,11 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
+import { AuthProvider } from "@/hooks/useAuth";
 
 export const metadata: Metadata = {
   title: "Ekhaata - Awaz se Khata aur Udhaar Prabandhan",
-  description: "Mobile-first, voice-first udhaar assistant for Indian shopkeepers powered by Gnani AI Prisma STT & Timbre TTS",
+  description:
+    "Mobile-first, voice-first udhaar assistant for Indian shopkeepers powered by Gnani AI Prisma STT & Timbre TTS",
 };
 
 export const viewport: Viewport = {
@@ -22,7 +24,7 @@ export default function RootLayout({
   return (
     <html lang="hi" className="h-full antialiased">
       <body className="min-h-full flex flex-col bg-[#F9F7F2] text-slate-900 selection:bg-emerald-200 selection:text-emerald-950 font-sans">
-        {children}
+        <AuthProvider>{children}</AuthProvider>
       </body>
     </html>
   );

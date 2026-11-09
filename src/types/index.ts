@@ -5,7 +5,15 @@ export type ShopkeeperIntent =
   | "ADD_PAYMENT"
   | "CHECK_BALANCE"
   | "CHECK_TOTAL"
+  | "REVERSE_TRANSACTION"
   | "UNKNOWN";
+
+export interface PendingOperation {
+  customer_name: string;
+  amount: number;
+  intent: "ADD_CREDIT" | "ADD_PAYMENT";
+  description?: string | null;
+}
 
 export interface StructuredCommand {
   intent: ShopkeeperIntent;
@@ -25,8 +33,13 @@ export interface ConversationContext {
   pendingCustomerName?: string | null;
   pendingAmount?: number | null;
   pendingDescription?: string | null;
-  lastQuestionType?: "customer_name" | "customer_disambiguation" | "amount" | "intent" | null;
+  lastQuestionType?: "customer_name" | "customer_disambiguation" | "amount" | "intent" | "confirmation" | "reversal_confirmation" | null;
   lastCustomerName?: string | null;
+  pendingMultipleOps?: PendingOperation[] | null;
+  pendingReversalId?: string | null;
+  pendingReversalCustomer?: string | null;
+  pendingReversalAmount?: number | null;
+  pendingReversalType?: "udhaar" | "jama" | null;
 }
 
 export interface ChatMessage {
@@ -77,8 +90,11 @@ export interface ConversationResponse {
   command: StructuredCommand;
   reply: string;
   updatedContext: ConversationContext;
-  engineUsed: "evon-api" | "indic-nlu-engine";
+  engineUsed: "gemini-flash" | "evon-api" | "indic-nlu-engine";
   evonAvailable: boolean;
+  geminiUsed?: boolean;
+  correctedTranscript?: string;
+  detectedLanguage?: "hi-IN" | "mr-IN" | "en-IN";
   error?: string;
   customerBalance?: number | null;
   totalPending?: number;

@@ -16,7 +16,15 @@ import { useVoiceRecorder } from "@/hooks/useVoiceRecorder";
 import { STTResponse } from "@/types";
 
 interface VoiceRecorderProps {
-  onTranscribe?: (transcript: string, detectedLanguage?: string) => void;
+  onTranscribe?: (
+    transcript: string,
+    detectedLanguage?: string,
+    audioData?: {
+      audioBlob: Blob;
+      audioBase64: string;
+      mimeType: string;
+    }
+  ) => void;
 }
 
 export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
@@ -41,29 +49,49 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
       : "wav";
     formData.append("audio", audioBlob, `speech.${ext}`);
 
-    const res = await fetch("/api/stt", {
-      method: "POST",
-      body: formData,
-    });
+    try {
+      const res = await fetch("/api/stt", {
+        method: "POST",
+        body: formData,
+      });
 
-    const data: STTResponse = await res.json();
+      const data: STTResponse = await res.json();
 
-    if (!res.ok || !data.success) {
-      throw new Error(data.error || "Gnani Prisma STT connection failed.");
-    }
+      if (!res.ok || !data.success) {
+        setNoticeMessage(
+          data?.error || "Prisma STT se connect nahi ho paya. Kripya dobara koshish karein."
+        );
+        return;
+      }
 
-    if (data.isEmpty || !data.transcript || data.transcript.trim() === "") {
+      if (data.isEmpty || !data.transcript || data.transcript.trim() === "") {
+        setNoticeMessage(
+          "Koi awaaz detect nahi hui. Kripya microphone ke paas aakar thoda spasht bolein."
+        );
+        return;
+      }
+
+      setLastTranscript(data.transcript);
+      setLastLanguage(data.detectedLanguage || "indic-auto");
+
+      if (onTranscribe) {
+        // Convert audioBlob to base64 so Gemini API can inspect the original audio
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const base64String = (reader.result as string) || "";
+          onTranscribe(data.transcript!, data.detectedLanguage, {
+            audioBlob,
+            audioBase64: base64String,
+            mimeType: audioBlob.type || "audio/wav",
+          });
+        };
+        reader.readAsDataURL(audioBlob);
+      }
+    } catch (err: unknown) {
+      console.warn("STT submission error:", err);
       setNoticeMessage(
-        "Koi awaaz detect nahi hui. Kripya thoda tez aur spasht bolein."
+        "Awaaz upload karne me dikkat aayi. Kripya internet check karke dobara bolein."
       );
-      return;
-    }
-
-    setLastTranscript(data.transcript);
-    setLastLanguage(data.detectedLanguage || "indic-auto");
-
-    if (onTranscribe) {
-      onTranscribe(data.transcript, data.detectedLanguage);
     }
   };
 

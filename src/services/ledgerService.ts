@@ -17,6 +17,7 @@ import {
   dbGetAllCustomers,
   dbFindCustomerMatch,
   dbReverseTransaction,
+  dbGetLastReversibleTransaction,
 } from "./databaseLedgerService";
 
 export interface CustomerBalanceInfo {
@@ -116,11 +117,12 @@ function saveTransactions(txs: Transaction[]): void {
 
 /**
  * Returns a list of all distinct canonical customer names currently in the ledger.
+ * shopId is used only for the Supabase path; ignored in JSON fallback.
  */
-export async function getAllCustomerNames(): Promise<string[]> {
-  if (checkSupabaseConfig().isConfigured) {
+export async function getAllCustomerNames(shopId?: string | null): Promise<string[]> {
+  if (checkSupabaseConfig().isConfigured && shopId) {
     try {
-      const dbCusts = await dbGetAllCustomers();
+      const dbCusts = await dbGetAllCustomers(shopId);
       return dbCusts.map((c) => c.name);
     } catch (err) {
       console.warn("Falling back to local cache for customer names:", err);
@@ -140,35 +142,42 @@ export async function getAllCustomerNames(): Promise<string[]> {
 /**
  * Searches for a customer using normalized Indic full-name matching.
  */
-export async function findCustomerMatch(queryName: string): Promise<CustomerMatchResult> {
-  if (checkSupabaseConfig().isConfigured) {
+export async function findCustomerMatch(
+  queryName: string,
+  shopId?: string | null
+): Promise<CustomerMatchResult> {
+  if (checkSupabaseConfig().isConfigured && shopId) {
     try {
-      return await dbFindCustomerMatch(queryName);
+      return await dbFindCustomerMatch(queryName, shopId);
     } catch (err) {
       console.warn("Falling back to local customer match:", err);
     }
   }
 
-  const existingNames = await getAllCustomerNames();
+  const existingNames = await getAllCustomerNames(shopId);
   return matchCustomerNameAgainstLedger(queryName, existingNames);
 }
 
 /**
  * Adds a new credit (udhaar) or payment (jama) transaction.
  * Automatically persists to Supabase PostgreSQL when credentials exist.
+ * shopId scopes the transaction to the authenticated user's shop.
  */
 export async function recordTransaction(
   customerName: string,
   type: "udhaar" | "jama",
   amount: number,
-  timeString?: string
+  timeString?: string,
+  shopId?: string | null
 ): Promise<Transaction> {
   let canonicalName = customerName.trim();
 
-  // Try Supabase first if configured
-  if (checkSupabaseConfig().isConfigured) {
+  // Try Supabase first if configured and shopId is known
+  if (checkSupabaseConfig().isConfigured && shopId) {
     try {
-      const dbResult = await dbRecordTransaction(customerName, type, amount);
+      const dbResult = await dbRecordTransaction(customerName, type, amount, {
+        shopId,
+      });
       canonicalName = dbResult.customer.name;
     } catch (err) {
       console.error("Supabase recordTransaction failed, writing to fallback:", err);
@@ -177,7 +186,7 @@ export async function recordTransaction(
 
   // Also maintain local transactions cache
   const transactions = loadTransactions();
-  const matchResult = await findCustomerMatch(customerName);
+  const matchResult = await findCustomerMatch(customerName, shopId);
 
   if (matchResult.status === "exact_match" || matchResult.status === "single_match") {
     canonicalName = matchResult.matchedName!;
@@ -211,17 +220,22 @@ export async function recordTransaction(
  */
 export async function reverseTransaction(
   transactionId: string,
-  reason?: string
+  reason?: string,
+  shopId?: string | null
 ): Promise<Transaction> {
-  if (checkSupabaseConfig().isConfigured) {
+  if (checkSupabaseConfig().isConfigured && shopId) {
     try {
-      const rev = await dbReverseTransaction(transactionId, reason);
+      const rev = await dbReverseTransaction(transactionId, reason, shopId);
       return {
         id: rev.id,
         customerName: "Reversal",
         type: rev.type === "udhaar" ? "udhaar" : "jama",
         amount: Number(rev.amount),
-        time: new Date().toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit", hour12: true }),
+        time: new Date().toLocaleTimeString("en-IN", {
+          hour: "numeric",
+          minute: "2-digit",
+          hour12: true,
+        }),
       };
     } catch (err) {
       console.error("Supabase reverseTransaction failed:", err);
@@ -232,13 +246,61 @@ export async function reverseTransaction(
 }
 
 /**
+ * Gets the last transaction eligible for reversal in the given shop.
+ */
+export async function getLastReversibleTransaction(
+  shopId?: string | null
+): Promise<{
+  id: string;
+  customerName: string;
+  type: "udhaar" | "jama";
+  amount: number;
+} | null> {
+  if (checkSupabaseConfig().isConfigured && shopId) {
+    try {
+      const last = await dbGetLastReversibleTransaction(shopId);
+      if (last) {
+        const typeUpper = (last.type || "").toUpperCase();
+        const normType: "udhaar" | "jama" =
+          typeUpper === "JAMA" || typeUpper === "PAYMENT" ? "jama" : "udhaar";
+        return {
+          id: last.id,
+          customerName: last.customer_name,
+          type: normType,
+          amount: last.amount,
+        };
+      }
+    } catch (err) {
+      console.warn("dbGetLastReversibleTransaction failed:", err);
+    }
+  }
+
+  // Fallback to local transactions
+  const txs = loadTransactions();
+  if (txs.length > 0) {
+    const last = txs[0];
+    return {
+      id: last.id,
+      customerName: last.customerName,
+      type: last.type,
+      amount: last.amount,
+    };
+  }
+
+  return null;
+}
+
+/**
  * Calculates individual customer balance using credit and payment history.
  * Balance = Total Udhaar - Total Jama.
  */
-export async function getCustomerBalance(customerName: string): Promise<CustomerBalanceInfo> {
-  if (checkSupabaseConfig().isConfigured) {
+export async function getCustomerBalance(
+  customerName: string,
+  shopId?: string | null
+): Promise<CustomerBalanceInfo> {
+  if (checkSupabaseConfig().isConfigured && shopId) {
     try {
-      const dbBal = await dbGetCustomerBalance(customerName);
+      const dbBal = await dbGetCustomerBalance(customerName, shopId);
       if (dbBal.exists) {
         return {
           exists: dbBal.exists,
@@ -260,7 +322,7 @@ export async function getCustomerBalance(customerName: string): Promise<Customer
   let totalPayment = 0;
   let matchCount = 0;
 
-  const matchResult = await findCustomerMatch(customerName);
+  const matchResult = await findCustomerMatch(customerName, shopId);
   let canonicalName = customerName.trim();
   if (matchResult.status === "exact_match" || matchResult.status === "single_match") {
     canonicalName = matchResult.matchedName!;
@@ -292,6 +354,7 @@ export async function getCustomerBalance(customerName: string): Promise<Customer
 
 /**
  * Returns a map of customer canonical names to their net outstanding balances.
+ * Used only for JSON fallback path.
  */
 export function getAllCustomerBalances(): Record<string, number> {
   const transactions = loadTransactions();
@@ -316,10 +379,10 @@ export function getAllCustomerBalances(): Record<string, number> {
  * Calculates total pending udhaar across all customers.
  * Total pending equals the sum of all individual positive balances.
  */
-export async function getTotalPendingUdhaar(): Promise<number> {
-  if (checkSupabaseConfig().isConfigured) {
+export async function getTotalPendingUdhaar(shopId?: string | null): Promise<number> {
+  if (checkSupabaseConfig().isConfigured && shopId) {
     try {
-      const { totalPendingRupees } = await dbGetTotalPendingUdhaar();
+      const { totalPendingRupees } = await dbGetTotalPendingUdhaar(shopId);
       return totalPendingRupees;
     } catch (err) {
       console.warn("Supabase total pending failed, falling back:", err);
@@ -339,10 +402,10 @@ export async function getTotalPendingUdhaar(): Promise<number> {
 /**
  * Returns the number of active customers with an outstanding credit balance.
  */
-export async function getActiveCustomersCount(): Promise<number> {
-  if (checkSupabaseConfig().isConfigured) {
+export async function getActiveCustomersCount(shopId?: string | null): Promise<number> {
+  if (checkSupabaseConfig().isConfigured && shopId) {
     try {
-      const { activeCustomersCount } = await dbGetTotalPendingUdhaar();
+      const { activeCustomersCount } = await dbGetTotalPendingUdhaar(shopId);
       return activeCustomersCount;
     } catch (err) {
       console.warn("Supabase active count failed, falling back:", err);
@@ -356,10 +419,13 @@ export async function getActiveCustomersCount(): Promise<number> {
 /**
  * Returns the latest recent transactions.
  */
-export async function getRecentTransactions(limit = 10): Promise<Transaction[]> {
-  if (checkSupabaseConfig().isConfigured) {
+export async function getRecentTransactions(
+  limit = 10,
+  shopId?: string | null
+): Promise<Transaction[]> {
+  if (checkSupabaseConfig().isConfigured && shopId) {
     try {
-      const txs = await dbGetRecentTransactions(limit);
+      const txs = await dbGetRecentTransactions(limit, shopId);
       if (txs.length > 0) return txs;
     } catch (err) {
       console.warn("Supabase recent transactions failed, falling back:", err);

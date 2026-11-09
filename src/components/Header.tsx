@@ -1,12 +1,18 @@
 import React from "react";
-import { Sparkles, Mic } from "lucide-react";
+import { Sparkles, Mic, LogOut } from "lucide-react";
 
 interface HeaderProps {
   storeName?: string;
+  userEmail?: string;
+  onSignOut?: () => void;
+  isOnline?: boolean;
 }
 
 export const Header: React.FC<HeaderProps> = ({
-  storeName = "Sharma Kirana Store",
+  storeName = "Meri Dukaan",
+  userEmail,
+  onSignOut,
+  isOnline = true,
 }) => {
   return (
     <header className="w-full pt-4 pb-3 px-4 bg-white/80 backdrop-blur-md sticky top-0 z-20 border-b border-[#EFECE6]">
@@ -31,10 +37,25 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
         </div>
 
-        {/* Gnani AI Powered Tag */}
-        <div className="flex items-center gap-1 text-[11px] font-medium text-emerald-800 bg-[#EAF4F0] px-2.5 py-1 rounded-full border border-emerald-200/60">
-          <Sparkles className="w-3 h-3 text-emerald-600 animate-pulse" />
-          <span>Prisma &amp; Timbre</span>
+        {/* Right side: Gnani badge + logout */}
+        <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1 text-[11px] font-medium text-emerald-800 bg-[#EAF4F0] px-2.5 py-1 rounded-full border border-emerald-200/60">
+            <Sparkles className="w-3 h-3 text-emerald-600 animate-pulse" />
+            <span>Prisma &amp; Timbre</span>
+          </div>
+
+          {/* Logout button — only shown when user is authenticated */}
+          {onSignOut && (
+            <button
+              type="button"
+              onClick={onSignOut}
+              title={userEmail ? `Logout (${userEmail})` : "Logout"}
+              aria-label="Log out"
+              className="w-8 h-8 rounded-full bg-stone-100 hover:bg-red-50 hover:text-red-600 flex items-center justify-center text-stone-500 transition-colors cursor-pointer border border-stone-200/60"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+            </button>
+          )}
         </div>
       </div>
 
@@ -48,12 +69,21 @@ export const Header: React.FC<HeaderProps> = ({
             उधार या जमा बोलने के लिए नीचे माइक दबाएं
           </p>
         </div>
-        <div className="flex items-center gap-1">
-          <span className="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-ping"></span>
-          <span className="text-[11px] font-medium text-emerald-700">Online</span>
+        <div className="flex items-center gap-1.5">
+          <span
+            className={`inline-block w-2 h-2 rounded-full ${
+              isOnline ? "bg-emerald-500 animate-pulse" : "bg-rose-500"
+            }`}
+          ></span>
+          <span
+            className={`text-[11px] font-medium ${
+              isOnline ? "text-emerald-700" : "text-rose-700"
+            }`}
+          >
+            {isOnline ? "Online" : "Offline"}
+          </span>
         </div>
       </div>
     </header>
   );
 };
-
