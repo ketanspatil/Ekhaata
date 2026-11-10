@@ -1,5 +1,33 @@
 [
   {
+    "id": "tx-1794294278821-nksj",
+    "customerName": "सिद्धांत",
+    "type": "udhaar",
+    "amount": 100,
+    "time": "12:34 pm"
+  },
+  {
+    "id": "tx-1794293330271-3l6c",
+    "customerName": "सिद्धांत",
+    "type": "udhaar",
+    "amount": 2000,
+    "time": "12:18 pm"
+  },
+  {
+    "id": "tx-1794292120786-melk",
+    "customerName": "सिद्धांत",
+    "type": "udhaar",
+    "amount": 1000,
+    "time": "11:58 am"
+  },
+  {
+    "id": "tx-1794292038777-k4yq",
+    "customerName": "रमेश",
+    "type": "udhaar",
+    "amount": 500,
+    "time": "11:57 am"
+  },
+  {
     "id": "tx-1794219402505-m7tg",
     "customerName": "Siddhant",
     "type": "udhaar",
