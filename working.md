@@ -111,7 +111,23 @@ Browser (Next.js 16 Client)
 
 ## 4. Remaining Tasks
 
-### Module 8 — Customer Management & Reports
-- [ ] Customer directory list with outstanding balance badges
-- [ ] Customer profile ledger history view
-- [ ] Daily summary reports (PDF / WhatsApp shareable text)
+### Module 8 — Customer Management UI ✅
+- **Customer Directory List**: Dedicated Customers section displaying all customers belonging to the authenticated shop, their calculated balances, total credit given, total payments received, and last activity timestamps.
+- **Search & Sort**: Real-time filtering by customer name or phone number, with one-tap sorting by Highest Pending Udhaar (`balance DESC`) or Alphabetical (`A - Z`).
+- **Customer Profile & Ledger History**: Inspecting a customer opens their complete ledger sheet showing total credit, total payments, net balance, and chronological transaction history (dates, amounts, credit/payment badges, and notes).
+- **Manual Customer Creation**: Shopkeepers can add new customers manually (`+ Naya Grahak`) with name (required) and phone (optional), protected against accidental duplicates using normalized Indic name matching and scoped strictly to their authenticated `shop_id`.
+- **Mark Account as Settled ("Hisaab Barabar")**: One-click settlement button with confirmation modal that records a proper payment (`jama`) transaction for the outstanding balance into Supabase using integer paise accuracy, immediately updating balances without deleting or modifying previous transaction records.
+- **Dashboard Integration**: Clean top-level tab switcher between "Awaaz / Khata" (Voice AI ledger) and "Grahak (Customers)", synchronizing balances and transactions across both views.
+
+### Module 9 — Reports & Export ✅
+- **Daily & Weekly Financial Summaries**: Real-time aggregate reports displaying total credit given, total payments received, net outstanding amount, transaction counts, and pending customer counts. Filterable across Daily (today IST) and Weekly (current week IST).
+- **Monthly Pending Udhaar Report**: Comprehensive monthly report sorted by highest outstanding balance first, listing each customer's total credit, total payments, net remaining balance, along with overall shop totals.
+- **PDF Ledger Export**: Client-side vector PDF generation via `jspdf`, branded with Ekhaata header, shop metadata, generation timestamp in IST, summary financial cards, customer accounts table, and page footers.
+- **WhatsApp Shareable Reports**: One-click share formatting clean Unicode reports with bold figures, bulleted top pending balances, and click-to-chat `https://api.whatsapp.com/send?text=...` links without requiring third-party business API setups.
+- **Strict Integer-Paise Arithmetic & Data Security**: Derived exclusively from authenticated JWT session `shop_id`. Excludes reversed transactions from active totals while preserving audit trails. Zero floating-point rounding errors.
+
+---
+
+## 5. Next Steps
+- [ ] SMS / WhatsApp payment reminders for individual customers with high pending udhaar
+- [ ] Export reports in CSV format

@@ -18,7 +18,8 @@ import { Transaction } from "@/types";
 
 // Development-only fallback shop ID (used only when no authenticated user is present)
 // Preserved for JSON-fallback path; never used when user is authenticated.
-export const DEFAULT_SHOP_ID = "00000000-0000-0000-0000-000000000001";
+const DEV_DEFAULT_SHOP_ID = "00000000-0000-0000-0000-000000000001";
+export const DEFAULT_SHOP_ID = process.env.NODE_ENV !== "production" ? DEV_DEFAULT_SHOP_ID : undefined;
 
 export interface DBCustomer {
   id: string;
@@ -47,6 +48,7 @@ export interface DBCustomerBalanceInfo {
   exists: boolean;
   customerId?: string;
   displayName: string;
+  phone?: string | null;
   balance: number;
   balancePaise: number;
   totalCredit: number;
@@ -54,24 +56,34 @@ export interface DBCustomerBalanceInfo {
   totalPayment: number;
   totalPaymentPaise: number;
   transactionCount: number;
+  lastTransactionAt?: string | null;
+  createdAt?: string;
 }
 
 /**
  * Ensures the development default shop exists.
- * Only called in legacy/fallback paths — not used when user is authenticated.
+ * DEV ONLY — never called in production (NODE_ENV=production).
  */
 export async function ensureDefaultShopExists(): Promise<string> {
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      "ensureDefaultShopExists must not be called in production. " +
+      "Every shop must be created through the authenticated signup flow."
+    );
+  }
   const supabase = getSupabaseClient();
   if (!supabase) {
     throw new Error(
       "Supabase is not configured. Missing environment variables: " +
-        checkSupabaseConfig().missingVariables.join(", ")
+      checkSupabaseConfig().missingVariables.join(", ")
     );
   }
 
+  // Dev-only: hardcoded shop for local testing
+  const devShopId = "00000000-0000-0000-0000-000000000001";
   const { error } = await supabase.from("shops").upsert(
     {
-      id: DEFAULT_SHOP_ID,
+      id: devShopId,
       shop_name: "Sharma Kirana Store",
       currency: "INR",
     },
@@ -82,15 +94,18 @@ export async function ensureDefaultShopExists(): Promise<string> {
     console.warn("Could not ensure default shop:", error.message);
   }
 
-  return DEFAULT_SHOP_ID;
+  return devShopId;
 }
 
 /**
  * Fetches all customers for the shop.
  */
 export async function dbGetAllCustomers(
-  shopId: string = DEFAULT_SHOP_ID
+  shopId: string
 ): Promise<DBCustomer[]> {
+  if (!shopId) {
+    throw new Error('shopId is required to fetch customers');
+  }
   const supabase = getSupabaseClient();
   if (!supabase) return [];
 
@@ -113,8 +128,11 @@ export async function dbGetAllCustomers(
  */
 export async function dbFindCustomerMatch(
   queryName: string,
-  shopId: string = DEFAULT_SHOP_ID
+  shopId: string
 ): Promise<CustomerMatchResult & { customerRecord?: DBCustomer | null }> {
+  if (!shopId) {
+    throw new Error('shopId is required to find customer match');
+  }
   const customers = await dbGetAllCustomers(shopId);
   const existingNames = customers.map((c) => c.name);
 
@@ -142,8 +160,8 @@ export async function dbFindCustomerMatch(
  */
 export async function dbFindOrCreateCustomer(
   customerName: string,
-  phone?: string | null,
-  shopId: string = DEFAULT_SHOP_ID
+  shopId: string,
+  phone?: string | null
 ): Promise<DBCustomer> {
   const supabase = getSupabaseClient();
   if (!supabase) {
@@ -217,8 +235,11 @@ export async function dbRecordTransaction(
     throw new Error("Supabase is not configured.");
   }
 
-  const shopId = options?.shopId || DEFAULT_SHOP_ID;
-  const customer = await dbFindOrCreateCustomer(customerName, null, shopId);
+  const shopId = options?.shopId;
+  if (!shopId) {
+    throw new Error("shopId is required to record a transaction.");
+  }
+  const customer = await dbFindOrCreateCustomer(customerName, shopId, null);
 
   // Convert to integer paise (e.g. 1600.00 -> 160000 paise)
   const amountPaise = Math.round(amountRupees * 100);
@@ -272,9 +293,12 @@ export async function dbRecordTransaction(
  */
 export async function dbReverseTransaction(
   transactionId: string,
-  reason?: string,
-  shopId: string = DEFAULT_SHOP_ID
+  shopId: string,
+  reason?: string
 ): Promise<DBTransaction> {
+  if (!shopId) {
+    throw new Error("shopId is required to reverse a transaction.");
+  }
   const supabase = getSupabaseClient();
   if (!supabase) {
     throw new Error("Supabase is not configured.");
@@ -322,7 +346,7 @@ export async function dbReverseTransaction(
  * Retrieves the most recent eligible transaction for reversal in the given shop.
  */
 export async function dbGetLastReversibleTransaction(
-  shopId: string = DEFAULT_SHOP_ID
+  shopId: string
 ): Promise<{
   id: string;
   customer_id: string;
@@ -383,8 +407,21 @@ export async function dbGetLastReversibleTransaction(
  */
 export async function dbGetCustomerBalance(
   customerQuery: string,
-  shopId: string = DEFAULT_SHOP_ID
+  shopId: string
 ): Promise<DBCustomerBalanceInfo> {
+  if (!shopId) {
+    return {
+      exists: false,
+      displayName: customerQuery,
+      balance: 0,
+      balancePaise: 0,
+      totalCredit: 0,
+      totalCreditPaise: 0,
+      totalPayment: 0,
+      totalPaymentPaise: 0,
+      transactionCount: 0,
+    };
+  }
   const supabase = getSupabaseClient();
   if (!supabase) {
     return {
@@ -420,6 +457,7 @@ export async function dbGetCustomerBalance(
   const { data: txs, error } = await supabase
     .from("transactions")
     .select("type, amount, amount_paise")
+    .eq("shop_id", shopId)
     .eq("customer_id", customer.id);
 
   if (error || !txs) {
@@ -474,8 +512,11 @@ export async function dbGetCustomerBalance(
  * Calculates total pending udhaar across all customers in the shop.
  */
 export async function dbGetTotalPendingUdhaar(
-  shopId: string = DEFAULT_SHOP_ID
+  shopId: string
 ): Promise<{ totalPendingRupees: number; activeCustomersCount: number }> {
+  if (!shopId) {
+    return { totalPendingRupees: 0, activeCustomersCount: 0 };
+  }
   const supabase = getSupabaseClient();
   if (!supabase) {
     return { totalPendingRupees: 0, activeCustomersCount: 0 };
@@ -489,6 +530,7 @@ export async function dbGetTotalPendingUdhaar(
     const { data: txs } = await supabase
       .from("transactions")
       .select("type, amount, amount_paise")
+      .eq("shop_id", shopId)
       .eq("customer_id", c.id);
 
     if (txs) {
@@ -516,6 +558,48 @@ export async function dbGetTotalPendingUdhaar(
     totalPendingRupees: totalPendingPaise / 100,
     activeCustomersCount,
   };
+}
+
+/**
+ * Calculates total credit given today in Indian Standard Time (IST).
+ */
+export async function dbGetTodayUdhaar(
+  shopId: string
+): Promise<number> {
+  if (!shopId) return 0;
+  const supabase = getSupabaseClient();
+  if (!supabase) return 0;
+
+  const { startISO, endISO } = getISTDateRange("daily");
+
+  const { data: txs, error } = await supabase
+    .from("transactions")
+    .select("type, amount, amount_paise, reversal_of_id")
+    .eq("shop_id", shopId)
+    .gte("created_at", startISO)
+    .lte("created_at", endISO);
+
+  if (error || !txs) return 0;
+
+  // Track reversals
+  const reversedIds = new Set<string>();
+  for (const t of txs) {
+    if (t.reversal_of_id) reversedIds.add(t.reversal_of_id);
+  }
+
+  let todayCreditPaise = 0;
+  for (const t of txs) {
+    const typeUpper = (t.type || "").toUpperCase();
+    if (typeUpper === "UDHAAR" || typeUpper === "CREDIT") {
+      const paise =
+        t.amount_paise != null
+          ? Number(t.amount_paise)
+          : Math.round(Number(t.amount || 0) * 100);
+      todayCreditPaise += paise;
+    }
+  }
+
+  return todayCreditPaise / 100;
 }
 
 /**
@@ -562,4 +646,524 @@ export async function dbGetRecentTransactions(
       }),
     };
   });
+}
+
+/**
+ * Fetches all customers for a shop with their aggregated balance details.
+ * Module 8: Customer List View
+ */
+export async function dbGetShopCustomersWithBalances(
+  shopId: string
+): Promise<DBCustomerBalanceInfo[]> {
+  if (!shopId) return [];
+  const supabase = getSupabaseClient();
+  if (!supabase) return [];
+
+  // 1. Fetch all customers
+  const customers = await dbGetAllCustomers(shopId);
+  if (!customers || customers.length === 0) return [];
+
+  // 2. Fetch all transactions for this shop to aggregate balances in memory
+  // This is fast and completely accurate with integer paise
+  const { data: allTxs, error } = await supabase
+    .from("transactions")
+    .select("id, customer_id, type, amount, amount_paise, created_at")
+    .eq("shop_id", shopId)
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    console.error("Error fetching transactions for customer balance summary:", error);
+  }
+
+  // Group transactions by customer_id
+  const txsByCustomer: Record<string, Array<{ type: string; amount: number; amount_paise?: number; created_at: string }>> = {};
+  if (allTxs) {
+    for (const tx of allTxs) {
+      if (!txsByCustomer[tx.customer_id]) {
+        txsByCustomer[tx.customer_id] = [];
+      }
+      txsByCustomer[tx.customer_id].push(tx);
+    }
+  }
+
+  return customers.map((c) => {
+    const custTxs = txsByCustomer[c.id] || [];
+    let totalCreditPaise = 0;
+    let totalPaymentPaise = 0;
+    let lastTxAt: string | null = null;
+
+    for (const t of custTxs) {
+      if (!lastTxAt) {
+        lastTxAt = t.created_at;
+      }
+      const paise =
+        t.amount_paise != null
+          ? Number(t.amount_paise)
+          : Math.round(Number(t.amount || 0) * 100);
+      const typeUpper = (t.type || "").toUpperCase();
+      if (typeUpper === "UDHAAR" || typeUpper === "CREDIT") {
+        totalCreditPaise += paise;
+      } else if (typeUpper === "JAMA" || typeUpper === "PAYMENT") {
+        totalPaymentPaise += paise;
+      }
+    }
+
+    const balancePaise = totalCreditPaise - totalPaymentPaise;
+
+    return {
+      exists: true,
+      customerId: c.id,
+      displayName: c.name,
+      phone: c.phone || null,
+      balance: balancePaise / 100,
+      balancePaise,
+      totalCredit: totalCreditPaise / 100,
+      totalCreditPaise,
+      totalPayment: totalPaymentPaise / 100,
+      totalPaymentPaise,
+      transactionCount: custTxs.length,
+      lastTransactionAt: lastTxAt,
+      createdAt: c.created_at,
+    };
+  });
+}
+
+/**
+ * Fetches full profile and transaction history for a single customer.
+ * Module 8: Customer Details View
+ */
+export async function dbGetCustomerDetails(
+  customerId: string,
+  shopId: string
+): Promise<{
+  customer: DBCustomer;
+  balanceInfo: DBCustomerBalanceInfo;
+  transactions: Array<{
+    id: string;
+    type: "udhaar" | "jama" | "reversal";
+    amount: number;
+    description: string | null;
+    createdAt: string;
+  }>;
+} | null> {
+  const supabase = getSupabaseClient();
+  if (!supabase) return null;
+
+  const { data: customer, error: custErr } = await supabase
+    .from("customers")
+    .select("*")
+    .eq("id", customerId)
+    .eq("shop_id", shopId)
+    .single();
+
+  if (custErr || !customer) {
+    return null;
+  }
+
+  const { data: txs, error: txErr } = await supabase
+    .from("transactions")
+    .select("id, type, amount, amount_paise, description, created_at")
+    .eq("customer_id", customerId)
+    .eq("shop_id", shopId)
+    .order("created_at", { ascending: false });
+
+  if (txErr) {
+    console.error("Error fetching customer transactions:", txErr);
+  }
+
+  const transactionList = txs || [];
+  let totalCreditPaise = 0;
+  let totalPaymentPaise = 0;
+
+  const formattedTransactions = transactionList.map((t) => {
+    const paise =
+      t.amount_paise != null
+        ? Number(t.amount_paise)
+        : Math.round(Number(t.amount || 0) * 100);
+    const typeUpper = (t.type || "").toUpperCase();
+
+    let normalizedType: "udhaar" | "jama" | "reversal" = "udhaar";
+    if (typeUpper === "JAMA" || typeUpper === "PAYMENT") {
+      normalizedType = "jama";
+      totalPaymentPaise += paise;
+    } else if (typeUpper === "REVERSAL") {
+      normalizedType = "reversal";
+    } else {
+      normalizedType = "udhaar";
+      totalCreditPaise += paise;
+    }
+
+    return {
+      id: t.id,
+      type: normalizedType,
+      amount: Number(t.amount),
+      description: t.description || null,
+      createdAt: t.created_at,
+    };
+  });
+
+  const balancePaise = totalCreditPaise - totalPaymentPaise;
+
+  const balanceInfo: DBCustomerBalanceInfo = {
+    exists: true,
+    customerId: customer.id,
+    displayName: customer.name,
+    phone: customer.phone || null,
+    balance: balancePaise / 100,
+    balancePaise,
+    totalCredit: totalCreditPaise / 100,
+    totalCreditPaise,
+    totalPayment: totalPaymentPaise / 100,
+    totalPaymentPaise,
+    transactionCount: transactionList.length,
+    lastTransactionAt: transactionList[0]?.created_at || null,
+    createdAt: customer.created_at,
+  };
+
+  return {
+    customer,
+    balanceInfo,
+    transactions: formattedTransactions,
+  };
+}
+
+/**
+ * Settles a customer's entire outstanding balance by recording a proper payment (jama) transaction.
+ * Never modifies or deletes previous records.
+ * Module 8: Mark Account as Settled
+ */
+export async function dbSettleCustomerAccount(
+  customerId: string,
+  shopId: string,
+  notes?: string
+): Promise<{
+  settled: boolean;
+  settledAmount: number;
+  newBalance: number;
+  transaction?: DBTransaction;
+  message: string;
+}> {
+  const details = await dbGetCustomerDetails(customerId, shopId);
+  if (!details) {
+    throw new Error("Customer not found.");
+  }
+
+  const currentBalance = details.balanceInfo.balance;
+  if (currentBalance <= 0) {
+    return {
+      settled: false,
+      settledAmount: 0,
+      newBalance: currentBalance,
+      message: currentBalance === 0
+        ? "Grahak ka hisaab pehle se hi barabar hai (Balance is ₹0)."
+        : "Grahak ka advance jama hai, koi udhaar baki nahi hai.",
+    };
+  }
+
+  // Record a payment ('jama') transaction equal to the full outstanding balance
+  const result = await dbRecordTransaction(
+    details.customer.name,
+    "jama",
+    currentBalance,
+    {
+      shopId,
+      description: notes || "Poora hisaab barabar (Account settled in full)",
+      idempotencyKey: `settle-${customerId}-${Date.now()}`,
+    }
+  );
+
+  return {
+    settled: true,
+    settledAmount: currentBalance,
+    newBalance: 0,
+    transaction: result.transaction,
+    message: `${details.customer.name} ka ₹${currentBalance} ka hisaab poora barabar ho gaya.`,
+  };
+}
+
+/**
+ * Report summary interface for Module 9
+ */
+export interface DBFinancialReportSummary {
+  period: "daily" | "weekly" | "monthly";
+  startDate: string;
+  endDate: string;
+  shopName: string;
+  totalCreditPaise: number;
+  totalCreditRupees: number;
+  totalPaymentPaise: number;
+  totalPaymentRupees: number;
+  netPendingPaise: number;
+  netPendingRupees: number;
+  transactionCount: number;
+  pendingCustomersCount: number;
+  customers: Array<{
+    customerId: string;
+    customerName: string;
+    phone?: string | null;
+    creditPaise: number;
+    creditRupees: number;
+    paymentPaise: number;
+    paymentRupees: number;
+    balancePaise: number;
+    balanceRupees: number;
+    transactionCount: number;
+  }>;
+  transactions: Array<{
+    id: string;
+    createdAt: string;
+    customerName: string;
+    type: "udhaar" | "jama" | "reversal";
+    amount: number;
+    description?: string | null;
+  }>;
+}
+
+/**
+ * Calculates start and end timestamps in Indian Standard Time (IST, UTC+5:30)
+ */
+function getISTDateRange(period: "daily" | "weekly" | "monthly"): {
+  startISO: string;
+  endISO: string;
+} {
+  // Current time in IST
+  const now = new Date();
+  // IST offset is +330 minutes (+5:30)
+  const istOffset = 5.5 * 60 * 60 * 1000;
+  const istTime = new Date(now.getTime() + istOffset);
+
+  const istYear = istTime.getUTCFullYear();
+  const istMonth = istTime.getUTCMonth();
+  const istDate = istTime.getUTCDate();
+  const istDay = istTime.getUTCDay(); // 0 is Sunday
+
+  let startYear = istYear;
+  let startMonth = istMonth;
+  let startDate = istDate;
+
+  if (period === "daily") {
+    // Start of today IST
+    startDate = istDate;
+  } else if (period === "weekly") {
+    // Start of current week (Monday) in IST
+    const daysSinceMonday = (istDay + 6) % 7;
+    startDate = istDate - daysSinceMonday;
+  } else if (period === "monthly") {
+    // Start of current month in IST
+    startDate = 1;
+  }
+
+  // Construct start date in IST midnight (00:00:00.000) converted back to UTC ISO
+  const istStartMidnight = new Date(Date.UTC(startYear, startMonth, startDate, 0, 0, 0, 0));
+  const utcStart = new Date(istStartMidnight.getTime() - istOffset);
+
+  // End date is current moment in UTC
+  const utcEnd = now;
+
+  return {
+    startISO: utcStart.toISOString(),
+    endISO: utcEnd.toISOString(),
+  };
+}
+
+/**
+ * Generates financial report (Daily, Weekly, or Monthly) with integer paise accuracy.
+ * Excludes reversed transactions from totals while preserving audit integrity.
+ * Module 9: Reports & Export
+ */
+export async function dbGenerateFinancialReport(
+  period: "daily" | "weekly" | "monthly",
+  shopId: string
+): Promise<DBFinancialReportSummary> {
+  if (!shopId) {
+    throw new Error("shopId is required to generate a financial report.");
+  }
+  const supabase = getSupabaseClient();
+  if (!supabase) {
+    throw new Error("Supabase is not configured.");
+  }
+
+  // 1. Get Shop metadata
+  const { data: shop } = await supabase
+    .from("shops")
+    .select("shop_name")
+    .eq("id", shopId)
+    .maybeSingle();
+
+  const shopName = shop?.shop_name || "Meri Dukaan";
+
+  // 2. Determine IST date range
+  const { startISO, endISO } = getISTDateRange(period);
+
+  // 3. Get all customers for this shop
+  const customers = await dbGetAllCustomers(shopId);
+  const customerMap = new Map<string, DBCustomer>();
+  for (const c of customers) {
+    customerMap.set(c.id, c);
+  }
+
+  // 4. Fetch all transactions for this shop in the period
+  // Also fetch any reversal links to exclude reversed entries
+  const { data: txsData, error: txErr } = await supabase
+    .from("transactions")
+    .select("id, customer_id, type, amount, amount_paise, description, reversal_of_id, created_at")
+    .eq("shop_id", shopId)
+    .gte("created_at", startISO)
+    .lte("created_at", endISO)
+    .order("created_at", { ascending: false });
+
+  if (txErr) {
+    console.error("Error fetching transactions for report:", txErr);
+  }
+
+  const periodTxs = txsData || [];
+
+  // Identify all transaction IDs that have been reversed
+  const reversedTxIds = new Set<string>();
+  for (const t of periodTxs) {
+    if (t.reversal_of_id) {
+      reversedTxIds.add(t.reversal_of_id);
+    }
+  }
+
+  // Aggregate period totals and customer breakdown
+  let totalCreditPaise = 0;
+  let totalPaymentPaise = 0;
+  let validTxCount = 0;
+
+  interface CustomerPeriodAcc {
+    creditPaise: number;
+    paymentPaise: number;
+    txCount: number;
+  }
+  const custAccMap = new Map<string, CustomerPeriodAcc>();
+
+  const reportTransactions: DBFinancialReportSummary["transactions"] = [];
+
+  for (const t of periodTxs) {
+    const cust = customerMap.get(t.customer_id);
+    const custName = cust?.name || "Grahak";
+
+    const paise =
+      t.amount_paise != null
+        ? Number(t.amount_paise)
+        : Math.round(Number(t.amount || 0) * 100);
+
+    const typeUpper = (t.type || "").toUpperCase();
+    const isReversed = reversedTxIds.has(t.id);
+    const isReversalRecord = typeUpper === "REVERSAL";
+
+    let normType: "udhaar" | "jama" | "reversal" = "udhaar";
+    if (isReversalRecord) {
+      normType = "reversal";
+    } else if (typeUpper === "JAMA" || typeUpper === "PAYMENT") {
+      normType = "jama";
+    }
+
+    reportTransactions.push({
+      id: t.id,
+      createdAt: t.created_at,
+      customerName: custName,
+      type: normType,
+      amount: Number(t.amount),
+      description: isReversed
+        ? `[Wapas / Reversed] ${t.description || ""}`.trim()
+        : t.description || null,
+    });
+
+    // Skip financial accumulation for reversed or reversal records
+    if (isReversed || isReversalRecord) {
+      continue;
+    }
+
+    validTxCount++;
+    if (!custAccMap.has(t.customer_id)) {
+      custAccMap.set(t.customer_id, { creditPaise: 0, paymentPaise: 0, txCount: 0 });
+    }
+    const acc = custAccMap.get(t.customer_id)!;
+    acc.txCount++;
+
+    if (normType === "udhaar") {
+      totalCreditPaise += paise;
+      acc.creditPaise += paise;
+    } else if (normType === "jama") {
+      totalPaymentPaise += paise;
+      acc.paymentPaise += paise;
+    }
+  }
+
+  // Format customer summaries for report
+  // If period is monthly, include all customers with their active balances or period activity
+  const reportCustomers: DBFinancialReportSummary["customers"] = [];
+
+  if (period === "monthly") {
+    // For monthly report, requirement says:
+    // Customer name, Total credit, Total payments, Remaining outstanding balance, Number of pending customers
+    // Sort customers by highest outstanding amount first
+    const allCustomerBalances = await dbGetShopCustomersWithBalances(shopId);
+    for (const cb of allCustomerBalances) {
+      const periodAcc = custAccMap.get(cb.customerId || "") || {
+        creditPaise: 0,
+        paymentPaise: 0,
+        txCount: 0,
+      };
+
+      reportCustomers.push({
+        customerId: cb.customerId || "",
+        customerName: cb.displayName,
+        phone: cb.phone,
+        creditPaise: periodAcc.creditPaise,
+        creditRupees: periodAcc.creditPaise / 100,
+        paymentPaise: periodAcc.paymentPaise,
+        paymentRupees: periodAcc.paymentPaise / 100,
+        balancePaise: cb.balancePaise,
+        balanceRupees: cb.balance,
+        transactionCount: periodAcc.txCount || cb.transactionCount,
+      });
+    }
+
+    // Sort by highest outstanding balance first
+    reportCustomers.sort((a, b) => b.balancePaise - a.balancePaise);
+  } else {
+    // Daily / Weekly: include customers active in this period or with pending balance
+    for (const [custId, acc] of custAccMap.entries()) {
+      const cust = customerMap.get(custId);
+      const balancePaise = acc.creditPaise - acc.paymentPaise;
+      reportCustomers.push({
+        customerId: custId,
+        customerName: cust?.name || "Grahak",
+        phone: cust?.phone,
+        creditPaise: acc.creditPaise,
+        creditRupees: acc.creditPaise / 100,
+        paymentPaise: acc.paymentPaise,
+        paymentRupees: acc.paymentPaise / 100,
+        balancePaise,
+        balanceRupees: balancePaise / 100,
+        transactionCount: acc.txCount,
+      });
+    }
+
+    reportCustomers.sort((a, b) => b.balancePaise - a.balancePaise);
+  }
+
+  // Count customers with positive pending balance
+  const pendingCustomersCount = reportCustomers.filter((c) => c.balancePaise > 0).length;
+  const netPendingPaise = totalCreditPaise - totalPaymentPaise;
+
+  return {
+    period,
+    startDate: startISO,
+    endDate: endISO,
+    shopName,
+    totalCreditPaise,
+    totalCreditRupees: totalCreditPaise / 100,
+    totalPaymentPaise,
+    totalPaymentRupees: totalPaymentPaise / 100,
+    netPendingPaise,
+    netPendingRupees: netPendingPaise / 100,
+    transactionCount: validTxCount,
+    pendingCustomersCount,
+    customers: reportCustomers,
+    transactions: reportTransactions,
+  };
 }

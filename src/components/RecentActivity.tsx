@@ -6,33 +6,19 @@ interface RecentActivityProps {
   transactions?: Transaction[];
 }
 
-const DEFAULT_TRANSACTIONS: Transaction[] = [
-  {
-    id: "tx-1",
-    customerName: "Ramesh Kumar",
-    type: "udhaar",
-    amount: 500,
-    time: "Abhi-abhi",
-  },
-  {
-    id: "tx-2",
-    customerName: "Suresh Patil",
-    type: "jama",
-    amount: 1000,
-    time: "Aaj, 9:30 AM",
-  },
-  {
-    id: "tx-3",
-    customerName: "Anita Bai",
-    type: "udhaar",
-    amount: 250,
-    time: "Kal dopahar",
-  },
-];
-
 export const RecentActivity: React.FC<RecentActivityProps> = ({
-  transactions = DEFAULT_TRANSACTIONS,
+  transactions = [],
 }) => {
+  if (transactions.length === 0) {
+    return (
+      <div className="mx-4 mt-3 mb-2 p-4 bg-white/90 rounded-2xl border border-[#EFECE6] shadow-[0_2px_10px_rgba(0,0,0,0.02)] flex flex-col items-center justify-center text-center py-6">
+        <Clock className="w-5 h-5 text-stone-300 mb-2" />
+        <p className="text-xs font-semibold text-stone-500">Abhi koi len-den nahi</p>
+        <p className="text-[11px] text-stone-400 mt-0.5">Pehla udhaar ya jama darj karein.</p>
+      </div>
+    );
+  }
+
   return (
     <div className="mx-4 mt-3 mb-2 p-3.5 bg-white/90 rounded-2xl border border-[#EFECE6] shadow-[0_2px_10px_rgba(0,0,0,0.02)]">
       <div className="flex items-center justify-between mb-2">
@@ -40,7 +26,7 @@ export const RecentActivity: React.FC<RecentActivityProps> = ({
           <Clock className="w-3.5 h-3.5 text-stone-500" />
           <span>Haal hi ka hisaab (Recent)</span>
         </div>
-        <span className="text-[10px] text-stone-400 font-medium">3 len-den</span>
+        <span className="text-[10px] text-stone-400 font-medium">{transactions.length} len-den</span>
       </div>
 
       <div className="divide-y divide-stone-100">

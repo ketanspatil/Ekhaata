@@ -98,6 +98,7 @@ export interface ConversationResponse {
   error?: string;
   customerBalance?: number | null;
   totalPending?: number;
+  todayUdhaar?: number;
   activeCustomersCount?: number;
   transactions?: Transaction[];
 }

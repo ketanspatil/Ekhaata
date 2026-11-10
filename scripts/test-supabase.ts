@@ -61,12 +61,14 @@ async function runDatabaseTest() {
 
   let stepFailures = 0;
 
+  const devShopId = "00000000-0000-0000-0000-000000000001";
+
   // -------------------------------------------------------------------------
   // STEP 1: Add ₹1,600 credit for Ramesh Patil
   // -------------------------------------------------------------------------
   console.log("─── STEP 1: Add ₹1,600 credit for Ramesh Patil ───");
   try {
-    const res1 = await dbRecordTransaction("Ramesh Patil", "udhaar", 1600);
+    const res1 = await dbRecordTransaction("Ramesh Patil", "udhaar", 1600, { shopId: devShopId });
     console.log(`  Created customer: ${res1.customer.name} (ID: ${res1.customer.id})`);
     console.log(`  Recorded transaction: ${res1.transaction.type} of ₹${res1.transaction.amount} (${res1.transaction.amount_paise} paise)`);
     console.log("  ✓ PASS\n");
@@ -80,7 +82,7 @@ async function runDatabaseTest() {
   // -------------------------------------------------------------------------
   console.log("─── STEP 2: Record ₹500 payment from Ramesh ───");
   try {
-    const res2 = await dbRecordTransaction("Ramesh", "jama", 500);
+    const res2 = await dbRecordTransaction("Ramesh", "jama", 500, { shopId: devShopId });
     console.log(`  Matched customer: ${res2.customer.name}`);
     console.log(`  Recorded transaction: ${res2.transaction.type} of ₹${res2.transaction.amount} (${res2.transaction.amount_paise} paise)`);
     console.log("  ✓ PASS\n");
@@ -94,7 +96,7 @@ async function runDatabaseTest() {
   // -------------------------------------------------------------------------
   console.log("─── STEP 3: Check Ramesh's balance (Expected: ₹1,100) ───");
   try {
-    const bal3 = await dbGetCustomerBalance("Ramesh Patil");
+    const bal3 = await dbGetCustomerBalance("Ramesh Patil", devShopId);
     console.log(`  Customer: ${bal3.displayName}`);
     console.log(`  Credit: ₹${bal3.totalCredit}, Payment: ₹${bal3.totalPayment}`);
     console.log(`  Net Balance: ₹${bal3.balance} (${bal3.balancePaise} paise)`);
@@ -114,7 +116,7 @@ async function runDatabaseTest() {
   // -------------------------------------------------------------------------
   console.log("─── STEP 4: Add ₹300 credit for Amit Sharma ───");
   try {
-    const res4 = await dbRecordTransaction("Amit Sharma", "udhaar", 300);
+    const res4 = await dbRecordTransaction("Amit Sharma", "udhaar", 300, { shopId: devShopId });
     console.log(`  Created customer: ${res4.customer.name} (ID: ${res4.customer.id})`);
     console.log(`  Recorded transaction: ${res4.transaction.type} of ₹${res4.transaction.amount}`);
     console.log("  ✓ PASS\n");
@@ -128,7 +130,7 @@ async function runDatabaseTest() {
   // -------------------------------------------------------------------------
   console.log("─── STEP 5: Check total pending (Expected: ₹1,400) ───");
   try {
-    const total5 = await dbGetTotalPendingUdhaar();
+    const total5 = await dbGetTotalPendingUdhaar(devShopId);
     console.log(`  Total Pending Across Shop: ₹${total5.totalPendingRupees}`);
     console.log(`  Active Customers with Balance > 0: ${total5.activeCustomersCount}`);
     if (total5.totalPendingRupees >= 1400) {
@@ -148,8 +150,8 @@ async function runDatabaseTest() {
   console.log("─── STEP 6 & 7: Simulate Restart & Verify Persistent Balances ───");
   try {
     // Direct re-fetch from database simulating brand new process
-    const rameshAfter = await dbGetCustomerBalance("Ramesh Patil");
-    const amitAfter = await dbGetCustomerBalance("Amit Sharma");
+    const rameshAfter = await dbGetCustomerBalance("Ramesh Patil", devShopId);
+    const amitAfter = await dbGetCustomerBalance("Amit Sharma", devShopId);
     console.log(`  Ramesh Patil Persistent Balance: ₹${rameshAfter.balance}`);
     console.log(`  Amit Sharma Persistent Balance: ₹${amitAfter.balance}`);
 

@@ -4,6 +4,7 @@ import {
   getTotalPendingUdhaar,
   getActiveCustomersCount,
   getRecentTransactions,
+  getTodayUdhaar,
 } from "@/services/ledgerService";
 import { getAuthenticatedUser, getSupabaseClient } from "@/services/supabaseClient";
 import { ConversationContext } from "@/types";
@@ -41,6 +42,7 @@ export async function GET(req: NextRequest) {
   return NextResponse.json({
     totalPending: await getTotalPendingUdhaar(shopId),
     activeCustomersCount: await getActiveCustomersCount(shopId),
+    todayUdhaar: await getTodayUdhaar(shopId),
     transactions: await getRecentTransactions(5, shopId),
   });
 }

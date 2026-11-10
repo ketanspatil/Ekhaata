@@ -18,6 +18,7 @@ import {
   dbFindCustomerMatch,
   dbReverseTransaction,
   dbGetLastReversibleTransaction,
+  dbGetTodayUdhaar,
 } from "./databaseLedgerService";
 
 export interface CustomerBalanceInfo {
@@ -48,23 +49,27 @@ export function isSameCustomer(nameA: string, nameB: string): boolean {
   return tokensA.every((t, i) => isTokenMatch(t, tokensB[i]));
 }
 
-// Initial seed transactions for local offline fallback
-const INITIAL_TRANSACTIONS: Transaction[] = [
-  {
-    id: "tx-suresh-1",
-    customerName: "Suresh Patil",
-    type: "udhaar",
-    amount: 1000,
-    time: "Aaj, 9:30 AM",
-  },
-  {
-    id: "tx-anita-1",
-    customerName: "Anita Bai",
-    type: "udhaar",
-    amount: 250,
-    time: "Kal dopahar",
-  },
-];
+// DEV ONLY: Seed transactions for local offline fallback.
+// In production, the app always reads from Supabase.
+const INITIAL_TRANSACTIONS: Transaction[] =
+  process.env.NODE_ENV !== "production"
+    ? [
+        {
+          id: "tx-suresh-1",
+          customerName: "Suresh Patil",
+          type: "udhaar",
+          amount: 1000,
+          time: "Aaj, 9:30 AM",
+        },
+        {
+          id: "tx-anita-1",
+          customerName: "Anita Bai",
+          type: "udhaar",
+          amount: 250,
+          time: "Kal dopahar",
+        },
+      ]
+    : [];
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const LEDGER_FILE = path.join(DATA_DIR, "ledger.json");
@@ -225,7 +230,7 @@ export async function reverseTransaction(
 ): Promise<Transaction> {
   if (checkSupabaseConfig().isConfigured && shopId) {
     try {
-      const rev = await dbReverseTransaction(transactionId, reason, shopId);
+      const rev = await dbReverseTransaction(transactionId, shopId, reason);
       return {
         id: rev.id,
         customerName: "Reversal",
@@ -389,14 +394,18 @@ export async function getTotalPendingUdhaar(shopId?: string | null): Promise<num
     }
   }
 
-  const balances = getAllCustomerBalances();
-  let sum = 0;
-  for (const bal of Object.values(balances)) {
-    if (bal > 0) {
-      sum += bal;
+  if (process.env.NODE_ENV !== "production") {
+    const balances = getAllCustomerBalances();
+    let sum = 0;
+    for (const bal of Object.values(balances)) {
+      if (bal > 0) {
+        sum += bal;
+      }
     }
+    return sum;
   }
-  return sum;
+
+  return 0;
 }
 
 /**
@@ -412,8 +421,26 @@ export async function getActiveCustomersCount(shopId?: string | null): Promise<n
     }
   }
 
-  const balances = getAllCustomerBalances();
-  return Object.values(balances).filter((b) => b > 0).length;
+  if (process.env.NODE_ENV !== "production") {
+    const balances = getAllCustomerBalances();
+    return Object.values(balances).filter((b) => b > 0).length;
+  }
+
+  return 0;
+}
+
+/**
+ * Returns today's total udhaar for the dashboard.
+ */
+export async function getTodayUdhaar(shopId?: string | null): Promise<number> {
+  if (checkSupabaseConfig().isConfigured && shopId) {
+    try {
+      return await dbGetTodayUdhaar(shopId);
+    } catch (err) {
+      console.warn("Supabase getTodayUdhaar failed:", err);
+    }
+  }
+  return 0;
 }
 
 /**
@@ -426,14 +453,18 @@ export async function getRecentTransactions(
   if (checkSupabaseConfig().isConfigured && shopId) {
     try {
       const txs = await dbGetRecentTransactions(limit, shopId);
-      if (txs.length > 0) return txs;
+      return txs; // Return actual database transactions (empty array if none exist)
     } catch (err) {
       console.warn("Supabase recent transactions failed, falling back:", err);
     }
   }
 
-  const transactions = loadTransactions();
-  return transactions.slice(0, limit);
+  if (process.env.NODE_ENV !== "production") {
+    const transactions = loadTransactions();
+    return transactions.slice(0, limit);
+  }
+
+  return [];
 }
 
 /**

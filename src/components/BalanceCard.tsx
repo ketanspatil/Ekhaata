@@ -4,11 +4,13 @@ import { ArrowUpRight, Users, ShieldCheck } from "lucide-react";
 interface BalanceCardProps {
   totalPendingUdhaar?: number;
   activeCustomersCount?: number;
+  todayUdhaar?: number;
 }
 
 export const BalanceCard: React.FC<BalanceCardProps> = ({
-  totalPendingUdhaar = 12500,
-  activeCustomersCount = 14,
+  totalPendingUdhaar = 0,
+  activeCustomersCount = 0,
+  todayUdhaar = 0,
 }) => {
   // Format Indian currency cleanly
   const formattedBalance = new Intl.NumberFormat("en-IN", {
@@ -16,6 +18,12 @@ export const BalanceCard: React.FC<BalanceCardProps> = ({
     currency: "INR",
     maximumFractionDigits: 0,
   }).format(totalPendingUdhaar);
+
+  const formattedToday = new Intl.NumberFormat("en-IN", {
+    style: "currency",
+    currency: "INR",
+    maximumFractionDigits: 0,
+  }).format(todayUdhaar);
 
   return (
     <div className="mx-4 mt-3 p-4 bg-white rounded-2xl border border-[#EFECE6] shadow-[0_2px_12px_rgba(0,0,0,0.03)]">
@@ -49,7 +57,10 @@ export const BalanceCard: React.FC<BalanceCardProps> = ({
       <div className="mt-3 pt-2.5 border-t border-stone-100 flex items-center justify-between text-[11px] text-stone-500">
         <span className="flex items-center gap-1">
           <ArrowUpRight className="w-3.5 h-3.5 text-amber-600" />
-          <span>Aaj ka udhaar: <strong>+₹1,500</strong></span>
+          <span>
+            Aaj ka udhaar:{" "}
+            <strong>{todayUdhaar > 0 ? `+${formattedToday}` : "₹0"}</strong>
+          </span>
         </span>
         <span className="text-stone-400 font-mono text-[10px]">
           Aaj ka hisaab up-to-date

@@ -3,10 +3,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { Header } from "@/components/Header";
 import { BalanceCard } from "@/components/BalanceCard";
-import {
-  ConversationArea,
-  DEFAULT_SAMPLE_CONVERSATION,
-} from "@/components/ConversationArea";
+import { ConversationArea } from "@/components/ConversationArea";
 import { RecentActivity } from "@/components/RecentActivity";
 import { VoiceRecorder } from "@/components/VoiceRecorder";
 import { useAuth } from "@/hooks/useAuth";
@@ -17,25 +14,44 @@ import {
   ConversationResponse,
   Transaction,
 } from "@/types";
-import { Loader2 } from "lucide-react";
+import { Loader2, Mic, Users, FileText } from "lucide-react";
+import { CustomerManager } from "@/components/CustomerManager";
+import { ReportsManager } from "@/components/ReportsManager";
 
 export default function Home() {
   const { user, session, isLoading: authLoading, isAuthenticated, signOut } = useAuth();
   const router = useRouter();
 
-  const [messages, setMessages] = useState<ChatMessage[]>(
-    DEFAULT_SAMPLE_CONVERSATION
-  );
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [conversationContext, setConversationContext] =
     useState<ConversationContext>({});
   const [isThinking, setIsThinking] = useState(false);
   const [totalPending, setTotalPending] = useState<number>(0);
   const [activeCustomersCount, setActiveCustomersCount] = useState<number>(0);
+  const [todayUdhaar, setTodayUdhaar] = useState<number>(0);
   const [recentTransactions, setRecentTransactions] = useState<Transaction[]>([]);
   const [activePlayingId, setActivePlayingId] = useState<string | null>(null);
   const [isOnline, setIsOnline] = useState<boolean>(true);
+  const [activeTab, setActiveTab] = useState<"voice" | "customers" | "reports">("voice");
 
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  // Clear all conversation & dashboard state when the authenticated user changes.
+  // This guarantees a fresh screen when a new account logs in.
+  useEffect(() => {
+    if (!authLoading) {
+      setMessages([]);
+      setConversationContext({});
+      setTotalPending(0);
+      setActiveCustomersCount(0);
+      setTodayUdhaar(0);
+      setRecentTransactions([]);
+      setActivePlayingId(null);
+      setActiveTab("voice");
+    }
+  // Re-run only when the user identity changes (by user id)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
 
   // Redirect unauthenticated users to login
   useEffect(() => {
@@ -87,8 +103,8 @@ export default function Home() {
     return {};
   };
 
-  // Fetch real ledger state on initial mount (after auth is ready)
-  useEffect(() => {
+  // Fetch real ledger state (can be called on mount or after transactions/settlements)
+  const refreshLedger = () => {
     if (!isAuthenticated || authLoading) return;
 
     fetch("/api/conversation", { headers: getAuthHeader() })
@@ -101,14 +117,23 @@ export default function Home() {
           if (typeof data.activeCustomersCount === "number") {
             setActiveCustomersCount(data.activeCustomersCount);
           }
-          if (Array.isArray(data.transactions) && data.transactions.length > 0) {
+          if (typeof data.todayUdhaar === "number") {
+            setTodayUdhaar(data.todayUdhaar);
+          }
+          // Always update recentTransactions from real API (may be empty [])
+          if (Array.isArray(data.transactions)) {
             setRecentTransactions(data.transactions);
           }
         }
       })
       .catch((err) => {
-        console.warn("Could not fetch initial ledger:", err);
+        console.warn("Could not fetch ledger state:", err);
       });
+  };
+
+  // Fetch real ledger state on initial mount (after auth is ready)
+  useEffect(() => {
+    refreshLedger();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAuthenticated, authLoading]);
 
@@ -262,6 +287,9 @@ export default function Home() {
         if (typeof data.activeCustomersCount === "number") {
           setActiveCustomersCount(data.activeCustomersCount);
         }
+        if (typeof data.todayUdhaar === "number") {
+          setTodayUdhaar(data.todayUdhaar);
+        }
         if (Array.isArray(data.transactions)) {
           setRecentTransactions(data.transactions);
         }
@@ -355,37 +383,84 @@ export default function Home() {
           isOnline={isOnline}
         />
 
-        {/* Scrollable Main Content Area */}
-        <div className="flex-1 overflow-y-auto pb-3 flex flex-col">
-          {/* 2. Dynamic Balance Card connected to real ledger */}
-          <BalanceCard
-            totalPendingUdhaar={totalPending}
-            activeCustomersCount={activeCustomersCount}
-          />
-
-          {/* 3. Conversation Area with Gnani Timbre TTS speech playback */}
-          <ConversationArea
-            messages={messages}
-            isThinking={isThinking}
-            activePlayingId={activePlayingId}
-            onPlayMessageAudio={(msgId, text) => {
-              const msg = messages.find((m) => m.id === msgId);
-              playAssistantSpeech(msgId, text, msg?.ttsAudioUrl);
-            }}
-          />
-
-          {/* 4. Recent Activity connected to real ledger */}
-          <RecentActivity
-            transactions={
-              recentTransactions.length > 0 ? recentTransactions : undefined
-            }
-          />
+        {/* Tab Navigation: Voice Ledger vs Grahak Directory vs Reports */}
+        <div className="flex border-b border-stone-200/80 bg-white/60 px-3 pt-2 gap-2 text-xs font-bold">
+          <button
+            onClick={() => setActiveTab("voice")}
+            className={`flex-1 pb-2 flex items-center justify-center gap-1.5 border-b-2 transition ${
+              activeTab === "voice"
+                ? "border-[#134E39] text-[#134E39]"
+                : "border-transparent text-stone-400 hover:text-stone-600"
+            }`}
+          >
+            <Mic className="w-3.5 h-3.5" />
+            <span>Awaaz / Khata</span>
+          </button>
+          <button
+            onClick={() => setActiveTab("customers")}
+            className={`flex-1 pb-2 flex items-center justify-center gap-1.5 border-b-2 transition ${
+              activeTab === "customers"
+                ? "border-[#134E39] text-[#134E39]"
+                : "border-transparent text-stone-400 hover:text-stone-600"
+            }`}
+          >
+            <Users className="w-3.5 h-3.5" />
+            <span>Grahak</span>
+          </button>
+          <button
+            onClick={() => setActiveTab("reports")}
+            className={`flex-1 pb-2 flex items-center justify-center gap-1.5 border-b-2 transition ${
+              activeTab === "reports"
+                ? "border-[#134E39] text-[#134E39]"
+                : "border-transparent text-stone-400 hover:text-stone-600"
+            }`}
+          >
+            <FileText className="w-3.5 h-3.5" />
+            <span>Reports</span>
+          </button>
         </div>
 
-        {/* 5. Sticky Microphone Recording Area at the Bottom */}
-        <div className="sticky bottom-0 z-30">
-          <VoiceRecorder onTranscribe={handleTranscribe} />
-        </div>
+        {activeTab === "voice" ? (
+          <>
+            {/* Scrollable Main Content Area for Voice Ledger */}
+            <div className="flex-1 overflow-y-auto pb-3 flex flex-col">
+              {/* 2. Dynamic Balance Card connected to real ledger */}
+              <BalanceCard
+                totalPendingUdhaar={totalPending}
+                activeCustomersCount={activeCustomersCount}
+                todayUdhaar={todayUdhaar}
+              />
+
+              {/* 3. Conversation Area with Gnani Timbre TTS speech playback */}
+              <ConversationArea
+                messages={messages}
+                isThinking={isThinking}
+                activePlayingId={activePlayingId}
+                onPlayMessageAudio={(msgId, text) => {
+                  const msg = messages.find((m) => m.id === msgId);
+                  playAssistantSpeech(msgId, text, msg?.ttsAudioUrl);
+                }}
+              />
+
+              {/* 4. Recent Activity connected to real ledger */}
+              <RecentActivity transactions={recentTransactions} />
+            </div>
+
+            {/* 5. Sticky Microphone Recording Area at the Bottom */}
+            <div className="sticky bottom-0 z-30">
+              <VoiceRecorder onTranscribe={handleTranscribe} />
+            </div>
+          </>
+        ) : activeTab === "customers" ? (
+          /* Module 8: Customer Management Section */
+          <CustomerManager
+            getAuthHeader={getAuthHeader}
+            onBalanceUpdated={refreshLedger}
+          />
+        ) : (
+          /* Module 9: Reports & Export Section */
+          <ReportsManager getAuthHeader={getAuthHeader} />
+        )}
       </div>
     </main>
   );

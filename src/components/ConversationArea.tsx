@@ -14,45 +14,9 @@ import {
 } from "lucide-react";
 import { ChatMessage } from "@/types";
 
-export const DEFAULT_SAMPLE_CONVERSATION: ChatMessage[] = [
-  {
-    id: "1",
-    sender: "shopkeeper",
-    text: "Ramesh ko 500 rupaye ka udhaar likho.",
-    timestamp: "10:14 AM",
-    audioNote: "Spoken in Hinglish",
-  },
-  {
-    id: "2",
-    sender: "ekhaata",
-    text: "Ramesh ka 500 rupaye udhaar jod doon?",
-    timestamp: "10:14 AM",
-    audioNote: "Ekhaata Intelligence • ADD_CREDIT",
-    structuredCommand: {
-      intent: "ADD_CREDIT",
-      customer_name: "Ramesh",
-      amount: 500,
-      description: null,
-      missing_fields: [],
-      needs_clarification: false,
-      confidence: 0.96,
-    },
-  },
-  {
-    id: "3",
-    sender: "shopkeeper",
-    text: "Haan.",
-    timestamp: "10:15 AM",
-    audioNote: "Confirmed via voice",
-  },
-  {
-    id: "4",
-    sender: "ekhaata",
-    text: "Ho gaya! Ramesh ka total baaki ₹1,200 hai.",
-    timestamp: "10:15 AM",
-    audioNote: "Ekhaata Intelligence • Khata updated",
-  },
-];
+// No demo conversation — every shop starts with a clean slate.
+// This export is preserved for type compatibility only.
+export const DEFAULT_SAMPLE_CONVERSATION: ChatMessage[] = [];
 
 interface ConversationAreaProps {
   messages?: ChatMessage[];
@@ -62,7 +26,7 @@ interface ConversationAreaProps {
 }
 
 export const ConversationArea: React.FC<ConversationAreaProps> = ({
-  messages = DEFAULT_SAMPLE_CONVERSATION,
+  messages = [],
   isThinking = false,
   activePlayingId = null,
   onPlayMessageAudio,
@@ -73,6 +37,24 @@ export const ConversationArea: React.FC<ConversationAreaProps> = ({
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length, isThinking]);
+
+  // Empty state — shown when there are no messages yet
+  if (messages.length === 0 && !isThinking) {
+    return (
+      <div className="mx-3.5 sm:mx-4 mt-3 flex flex-col flex-1 items-center justify-center py-12 text-center px-4">
+        <div className="w-14 h-14 rounded-full bg-[#134E39]/10 flex items-center justify-center mb-4">
+          <Mic className="w-7 h-7 text-[#134E39]/60" />
+        </div>
+        <p className="text-sm font-semibold text-stone-700">
+          Awaaz se shuru karein
+        </p>
+        <p className="text-xs text-stone-400 mt-1 max-w-[260px] leading-relaxed">
+          Neeche ke mic button ko dabayein aur baat karein — Ekhaata sun kar
+          khata tayaar karega.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="mx-3.5 sm:mx-4 mt-3 flex flex-col flex-1">
